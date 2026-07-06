@@ -1,0 +1,14 @@
+# GrammarAnywhere runtime dependencies
+#
+# Requires Python 3.10+ with tkinter (included in the python.org installer).
+# Install with:  pip install -r requirements.txt
+
+pynput>=1.7.6      # global keyboard listener + synthetic keystrokes
+pystray>=0.19.5    # system tray icon
+Pillow>=10.0       # tray icon rendering
+
+# Optional — only needed for the local GGUF backend
+# (Settings -> Model -> "Local model (.gguf)").
+# Cloud API and llama-server backends work without it.
+# The Windows installer ships a pinned build; if installing manually:
+#   pip install llama-cpp-python
