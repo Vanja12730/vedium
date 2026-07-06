@@ -146,6 +146,18 @@ class SpellDaemon:
     # ── Keyboard listener ─────────────────────────────────────────────────────
 
     def _on_press(self, key):
+        # pynput stops the listener thread if a callback raises, which would
+        # silently kill ALL keyboard handling until the app is restarted.
+        # Catch everything, log it, and keep listening.
+        try:
+            self._on_press_impl(key)
+        except Exception as exc:
+            diagnostics.record_throttled(
+                "keyboard", "error", "Key handler failed.", str(exc),
+                cooldown_sec=5.0,
+            )
+
+    def _on_press_impl(self, key):
         if not self.cfg.get("enabled", True):
             return
         idle_sec = self.cfg.get("idle_reset_sec", 30.0)
@@ -254,10 +266,17 @@ class SpellDaemon:
 
     def _on_release(self, key):
         """Clear _ctrl_held when the Ctrl/Cmd key is released."""
-        if not self.cfg.get("enabled", True):
-            return
-        if key in _CTRL_KEYS:
-            self._ctrl_held = False
+        # Same guard as _on_press: an exception here would stop the listener.
+        try:
+            if not self.cfg.get("enabled", True):
+                return
+            if key in _CTRL_KEYS:
+                self._ctrl_held = False
+        except Exception as exc:
+            diagnostics.record_throttled(
+                "keyboard", "error", "Key handler failed.", str(exc),
+                cooldown_sec=5.0,
+            )
 
     def _handle_rephrase_hotkey(self, mode_override: str | None = None):
         """

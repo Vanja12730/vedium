@@ -11,10 +11,11 @@ from .constants import DEFAULT_CFG
 from .llm import _stream_cancel, chat_with_text_stream, _streaming_answer, _clean_llm_output
 
 # We need access to the same _UI_ROOT and _ui_call as settings.
-from .ui_settings import _UI_ROOT, _ui_call
-
-_toast_win = None
-_auto_close_id = [None]
+# _UI_ROOT is read via the module (ui_settings._UI_ROOT) because it is rebound
+# when the UI thread starts — a from-import here would freeze the None it held
+# at import time and every toast would silently fall back to Tk's default root.
+from . import ui_settings
+from .ui_settings import _ui_call
 
 def _apply_windows_decorations(win):
     """Apply modern visual decorations to top-level windows on Windows (10/11).
@@ -79,7 +80,7 @@ class _Toast:
             _ui_call(self._trigger_ignore, wait=False)
 
     def _show(self):
-        root = tk.Toplevel(_UI_ROOT)
+        root = tk.Toplevel(ui_settings._UI_ROOT)
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.configure(bg=SURFACE)
@@ -445,7 +446,7 @@ class _EditableToast:
         _ui_call(_append, wait=False)
 
     def _show(self):
-        root = tk.Toplevel(_UI_ROOT)
+        root = tk.Toplevel(ui_settings._UI_ROOT)
         root.title(self._label)
         root.attributes("-topmost", True)
         root.configure(bg=SURFACE)
@@ -806,11 +807,11 @@ def _open_recent_rephrases():
                 "Recent Rephrases",
                 "No rephrase results yet.\n\nPress your rephrase hotkey (default F8) "
                 "to generate one.",
-                parent=_UI_ROOT,
+                parent=ui_settings._UI_ROOT,
             )
             return
 
-        win = tk.Toplevel(_UI_ROOT)
+        win = tk.Toplevel(ui_settings._UI_ROOT)
         win.title("Recent Rephrases")
         win.attributes("-topmost", True)
         win.configure(bg=BG)
@@ -916,7 +917,7 @@ def _info_toast(message: str, duration_ms: int = 2200):
     (which needs original/corrected text and accept/ignore callbacks).
     """
     def _show():
-        root = tk.Toplevel(_UI_ROOT)
+        root = tk.Toplevel(ui_settings._UI_ROOT)
         root.overrideredirect(True)
         root.attributes("-topmost", True)
         root.configure(bg=SURFACE)

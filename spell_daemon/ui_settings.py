@@ -3,9 +3,6 @@ import os
 import queue
 import threading
 import tkinter as tk
-_llm_backend = ''
-_llm_queue = None
-spell_check_sentence = None
 import tkinter.ttk as ttk
 from tkinter import filedialog, messagebox
 
@@ -2271,7 +2268,11 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     _bind_scroll(font_dd)
 
     # ── Status label + Save button (always visible, outside scroll area) ─────
-    status = tk.Label(bottom_bar, text=f"Ready ✓ ({_llm_backend})" if _llm_backend else "", font=FONT_B, bg=BG, fg=SUCCESS)
+    # Show the live backend if one is already connected ("None" = not connected).
+    _backend_now = getattr(llm, "_llm_backend", "") or ""
+    status = tk.Label(bottom_bar,
+                      text=f"Ready ✓ ({_backend_now})" if _backend_now and _backend_now != "None" else "",
+                      font=FONT_B, bg=BG, fg=SUCCESS)
     divider = tk.Frame(bottom_bar, bg=SURF2, height=1)
     divider.pack(fill="x", padx=130, pady=(2, 8))
     tk.Label(bottom_bar, text="\u223c", font=("Georgia", 12 + FONT_SIZE_OFFSET),
