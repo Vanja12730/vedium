@@ -9,7 +9,7 @@ import json
 import difflib
 import unicodedata
 
-from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS
+from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count
 from spell_daemon.config import load_cfg
 from spell_daemon.prompt_builder import _build_prompt, _build_chat_prompt
 from spell_daemon import diagnostics
@@ -1264,7 +1264,7 @@ _BHS_DIACRITIC_WORDS = {
     "zelim": "želim", "zelis": "želiš", "zeli": "želi", "zelimo": "želimo",
     "kaze": "kaže", "kazes": "kažeš", "kazem": "kažem",
     "ides": "ideš", "imas": "imaš", "znas": "znaš", "gledas": "gledaš",
-    "radis": "radiš", "vidis": "vidiš", "jedes": "ješ",
+    "radis": "radiš", "vidis": "vidiš", "jedes": "jedeš",
     # common nouns / adverbs / interjections
     "cao": "ćao", "sta": "šta", "nesto": "nešto", "nista": "ništa",
     "svasta": "svašta", "vise": "više", "jos": "još", "vec": "već",
@@ -2017,28 +2017,8 @@ def _similarity(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
 
-# Matches any CJK character (Hiragana, Katakana, CJK Unified Ideographs, etc.)
-_CJK_RE = re.compile(
-    r"[\u3040-\u30ff"   # Hiragana / Katakana
-    r"\u3400-\u4dbf"    # CJK Extension A
-    r"\u4e00-\u9fff"    # CJK Unified Ideographs (core block)
-    r"\uf900-\ufaff"    # CJK Compatibility Ideographs
-    r"\uff66-\uff9f]"   # Halfwidth Katakana
-)
-
-
-def _word_count(text: str) -> int:
-    """Return a word count suitable for both gating and token-budget estimates.
-
-    Space-separated languages: len(text.split()) as usual.
-    CJK languages (Chinese, Japanese, …): count non-whitespace characters,
-    since each character is roughly one morpheme and there are no spaces
-    between words.  This prevents Chinese text from being treated as a single
-    'word' and failing the min_word_count gate.
-    """
-    if _CJK_RE.search(text):
-        return sum(1 for c in text if not c.isspace())
-    return len(text.split())
+# _CJK_RE and _word_count live in constants.py (shared with buffer's
+# min-word gating); both are imported at the top of this module.
 
 
 def _word_count_ok(original: str, corrected: str, is_translation: bool = False) -> bool:

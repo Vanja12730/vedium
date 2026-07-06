@@ -437,51 +437,27 @@ def _detect_format_from_path(path: str) -> str | None:
 
     return None
 
-_BHS_ALLOWED = set("šŠčČćĆžŽđĐ")
-
-_CYRILLIC_TO_LATIN = {
-    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "ђ": "đ", "е": "e",
-    "ж": "ž", "з": "z", "и": "i", "ј": "j", "к": "k", "л": "l", "љ": "lj",
-    "м": "m", "н": "n", "њ": "nj", "о": "o", "п": "p", "р": "r", "с": "s",
-    "т": "t", "ћ": "ć", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "č",
-    "џ": "dž", "ш": "š",
-    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Ђ": "Đ", "Е": "E",
-    "Ж": "Ž", "З": "Z", "И": "I", "Ј": "J", "К": "K", "Л": "L", "Љ": "Lj",
-    "М": "M", "Н": "N", "Њ": "Nj", "О": "O", "П": "P", "Р": "R", "С": "S",
-    "T": "T", "Ђ": "Đ", "Ћ": "Ć", "У": "U", "Ф": "F", "Х": "H", "Ц": "C", "Ч": "Č",
-    "Џ": "Dž", "Š": "Š",
-}
-
-_BHS_DIACRITIC_WORDS = {
-    "isao": "išao", "dosao": "došao", "nasao": "našao", "prosao": "prošao",
-    "otisao": "otišao", "izasao": "izašao", "usao": "ušao",
-    "dosli": "došli", "nasli": "našli", "prosli": "prošli", "otisli": "otišli",
-    "izasli": "izašli", "dosla": "došla", "nasla": "našla", "prosla": "prošla",
-    "moze": "može", "mozes": "možeš", "mozemo": "možemo", "mozete": "možete",
-    "hoce": "hoće", "hoces": "hoćeš", "hocemo": "hoćemo", "hocete": "hoćete",
-    "nece": "neće", "neces": "nećeš", "necemo": "nećemo", "necete": "nećete",
-    "zelim": "želim", "zelis": "želiš", "zeli": "želi", "zelimo": "želimo",
-    "kaze": "kaže", "kazes": "kažeš", "kazem": "kažem",
-    "ides": "ideš", "imas": "imaš", "znas": "znaš", "gledas": "gledaš",
-    "radis": "radiš", "vidis": "vidiš", "jedes": "jedeš",
-    "cao": "ćao", "sta": "šta", "nesto": "nešto", "nista": "ništa",
-    "svasta": "svašta", "vise": "više", "jos": "još", "vec": "već",
-    "covek": "čovek", "covjek": "čovjek", "zena": "žena", "zene": "žene",
-    "muz": "muž", "noc": "noć", "noci": "noći", "moc": "moć",
-    "pomoc": "pomoć", "caj": "čaj", "cesto": "često", "veceras": "večeras",
-    "vecera": "večera",
-}
-
-_BHS_WORD_RE = re.compile(
-    r"\b(" + "|".join(re.escape(w) for w in sorted(_BHS_DIACRITIC_WORDS, key=len, reverse=True)) + r")\b",
-    re.IGNORECASE,
+# Matches any CJK character (Hiragana/Katakana, CJK ideographs, Hangul).
+_CJK_RE = re.compile(
+    r"[぀-ヿ"   # Hiragana / Katakana
+    r"㐀-䶿"    # CJK Extension A
+    r"一-鿿"    # CJK Unified Ideographs (core block)
+    r"豈-﫿"    # CJK Compatibility Ideographs
+    r"ｦ-ﾟ"    # Halfwidth Katakana
+    r"가-힯]"   # Hangul syllables
 )
 
-_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-
 def _word_count(text: str) -> int:
+    """Return a word count suitable for both gating and token-budget estimates.
+
+    Space-separated languages: len(text.split()) as usual.
+    CJK languages (Chinese, Japanese, Korean, ...): count non-whitespace
+    characters, since each character is roughly one morpheme and words are
+    not (reliably) space-separated.  This prevents CJK text from being
+    treated as a single 'word' and failing the min_word_count gate.
+    """
     if _CJK_RE.search(text):
-        return len(text)
+        return sum(1 for c in text if not c.isspace())
     return len(text.split())
 
 def _is_mid_token(sentence: str, punct: str) -> bool:
