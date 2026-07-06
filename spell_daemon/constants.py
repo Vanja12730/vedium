@@ -1,0 +1,527 @@
+import collections
+import os
+import re
+import sys
+from pynput.keyboard import Key
+
+# On macOS the clipboard shortcuts use the Command key; everywhere else Ctrl.
+_CMD_KEY = Key.cmd if sys.platform == "darwin" else Key.ctrl
+
+_CTRL_KEYS = frozenset({Key.ctrl, Key.ctrl_l, Key.ctrl_r}) | (
+    frozenset({Key.cmd, Key.cmd_l, Key.cmd_r}) if sys.platform == "darwin" else frozenset()
+)
+
+_OS_RESERVED_HOTKEYS = frozenset({"f6", "f7", "f10"})
+_OS_RESERVED_HOTKEY_REASONS = {
+    "f6":  "F6 focuses the browser address bar — the selection is lost before the copy fires.",
+    "f7":  "F7 toggles caret browsing in browsers — a dialog appears and steals focus before the copy fires.",
+    "f10": "F10 activates the Windows menu bar, which drops your text selection before it can be copied.",
+}
+
+# _HERE points to the refactored directory (where the launcher is)
+_HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+CONFIG_FILE = os.path.join(_HERE, "spell_daemon_config.json")
+
+_rephrase_history = collections.deque(maxlen=20)
+
+DEFAULT_CFG = {
+    "model_path":             "",
+    "server_url":             "",
+    "auto_detect_server":     True,
+    "server_disable_thinking": True,
+    "backend_mode":           "local",
+    "cloud_provider":         "",
+    "cloud_base_url":         "",
+    "cloud_api_key":          "",
+    "cloud_model":            "",
+    "cloud_api_keys":         {},
+    "cloud_favorites":        [],
+    "remember_cloud_api_key": True,
+    "prompt_format":          "ChatML  (Qwen / Phi-3 / Yi)",
+    "gpu_acceleration":       "Auto",
+    "working_language":       "Auto",
+    "trigger_chars":          ".!?",
+    "spell_check_mode":       "Toast",
+    "enabled":                True,
+    "min_word_count":         2,
+    "max_wait_sec":           12,
+    "rephrase_hotkey":        "f8",
+    "rephrase_mode":          "Rephrase Text",
+    "rephrase_creativity":    0.35,
+    "idle_reset_sec":         30.0,
+    "n_ctx":                  768,
+    "diacritics_only_auto":    False,
+    "colour_scheme":          "Parchment",
+    "custom_rephrase_modes":    {},
+    "builtin_prompt_overrides": {},
+    "mode_triggers":            {},
+    "mode_hotkeys":             {},
+    "thinking_budget":          0,
+    "font_size_offset":         0,
+}
+
+BG      = "#fbf8f2"
+SURFACE = "#fffdf8"
+SURF2   = "#ece5da"
+ACCENT  = "#2f6f55"
+ACCENT2 = "#3f8266"
+TEXT    = "#25221d"
+MUTED   = "#746c62"
+SUCCESS = "#2f7a4f"
+WARN    = "#8a5a1f"
+ERR     = "#9a3030"
+
+SCHEMES = {
+    "Forest": dict(
+        BG="#f4f7f0", SURFACE="#fffef9", SURF2="#dfe8d8",
+        ACCENT="#376b50", ACCENT2="#4f8366", TEXT="#1f2b22",
+        MUTED="#687767", SUCCESS="#2f7a4f", WARN="#8a5a1f", ERR="#9a3030",
+    ),
+    "Parchment": dict(
+        BG="#fbf8f2", SURFACE="#fffdf8", SURF2="#ece5da",
+        ACCENT="#2f6f55", ACCENT2="#3f8266", TEXT="#25221d",
+        MUTED="#746c62", SUCCESS="#2f7a4f", WARN="#8a5a1f", ERR="#a03030",
+    ),
+    "Slate": dict(
+        BG="#f6f7f8", SURFACE="#ffffff", SURF2="#dde2e8",
+        ACCENT="#355f8f", ACCENT2="#4f7cae", TEXT="#202733",
+        MUTED="#6b7481", SUCCESS="#2d7a52", WARN="#8a5a1f", ERR="#a13333",
+    ),
+    "Charcoal": dict(
+        BG="#202225", SURFACE="#292c30", SURF2="#373b40",
+        ACCENT="#7fb58f", ACCENT2="#9ac8a7", TEXT="#f2f0ea",
+        MUTED="#a5a096", SUCCESS="#8fca97", WARN="#d9a64a", ERR="#e07171",
+    ),
+    "Ink": dict(
+        BG="#fbfbfa", SURFACE="#ffffff", SURF2="#e5e3df",
+        ACCENT="#24283b", ACCENT2="#48506f", TEXT="#151515",
+        MUTED="#67645f", SUCCESS="#2e6b3e", WARN="#835f22", ERR="#962020",
+    ),
+    "Rose dust": dict(
+        BG="#fbf6f5", SURFACE="#fffdfb", SURF2="#eadedc",
+        ACCENT="#8f5965", ACCENT2="#a96f7a", TEXT="#2a1f20",
+        MUTED="#796968", SUCCESS="#547a50", WARN="#8f6228", ERR="#a03030",
+    ),
+}
+
+def apply_scheme(name: str):
+    global BG, SURFACE, SURF2, ACCENT, ACCENT2, TEXT, MUTED, SUCCESS, WARN, ERR
+    s = SCHEMES.get(name, SCHEMES["Parchment"])
+    BG      = s["BG"]
+    SURFACE = s["SURFACE"]
+    SURF2   = s["SURF2"]
+    ACCENT  = s["ACCENT"]
+    ACCENT2 = s["ACCENT2"]
+    TEXT    = s["TEXT"]
+    MUTED   = s["MUTED"]
+    SUCCESS = s["SUCCESS"]
+    WARN    = s["WARN"]
+    ERR     = s["ERR"]
+
+    import sys
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is not None and ("spell_daemon" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
+            for key in ["BG", "SURFACE", "SURF2", "ACCENT", "ACCENT2", "TEXT", "MUTED", "SUCCESS", "WARN", "ERR"]:
+                if hasattr(mod, key):
+                    setattr(mod, key, s[key])
+
+FONT_H = ("Georgia", 13, "bold")
+FONT_B = ("Segoe UI", 9)
+FONT_SIZE_OFFSET = 0
+
+def apply_font_size(offset: int):
+    global FONT_B, FONT_H, FONT_SIZE_OFFSET
+    FONT_B = ("Segoe UI", 9 + offset)
+    FONT_H = ("Georgia", 13 + offset, "bold")
+    FONT_SIZE_OFFSET = offset
+
+    import sys
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is not None and ("spell_daemon" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
+            if hasattr(mod, "FONT_B"):
+                setattr(mod, "FONT_B", FONT_B)
+            if hasattr(mod, "FONT_H"):
+                setattr(mod, "FONT_H", FONT_H)
+            if hasattr(mod, "FONT_SIZE_OFFSET"):
+                setattr(mod, "FONT_SIZE_OFFSET", FONT_SIZE_OFFSET)
+
+FORMATS = [
+    "ChatML  (Qwen / Phi-3 / Yi)",
+    "Llama 3  (Meta)",
+    "Mistral / Mixtral",
+    "Gemma  (Google)",
+    "Zephyr / HF Chat",
+    "Alpaca / Vicuna",
+    "DeepSeek",
+    "Command-R  (Cohere)",
+    "Plain  (no template)",
+]
+
+GPU_OPTIONS = ["Auto", "Off", "Full"]
+
+WORKING_LANGUAGE_OPTIONS = [
+    "Auto",
+    "English",
+    "BHS",
+    "German",
+    "Spanish",
+    "French",
+    "Italian",
+]
+
+_SLAVIC_LANGS = {"BHS"}
+
+def _is_header(mode: str) -> bool:
+    return mode.startswith("──")
+
+def _modes_with_headers(flat_modes: list[str]) -> list[str]:
+    _GROUPS = [
+        ("── Style & Tone ──",
+         {"More Casual", "More Formal (Academic)", "Diplomatically Worded"}),
+        ("── Structure & Clarity ──",
+         {"More Concise", "More Detailed", "Simpler Language",
+          "Explain It", "Explain It (Simply)", "Sharpen the Thesis", "Devil's Advocate"}),
+        ("── Correction ──",
+         {"Diacritics Only"}),
+    ]
+    result: list[str] = []
+    seen:   set[str]  = set()
+
+    for header, members in _GROUPS:
+        group = [m for m in flat_modes if m in members]
+        if group:
+            result.append(header)
+            result.extend(group)
+            seen.update(group)
+
+    custom = [m for m in flat_modes if m not in seen and not m.startswith("Translate ")]
+    if custom:
+        result.extend(custom)
+        seen.update(custom)
+
+    translations = [m for m in flat_modes if m.startswith("Translate ")]
+    if translations:
+        result.append("── Translation ──")
+        result.extend(translations)
+
+    return result
+
+REPHRASE_MODES = [
+    "More Casual",
+    "More Formal (Academic)",
+    "Diplomatically Worded",
+    "Rephrase Text",
+    "More Concise",
+    "More Detailed",
+    "Simpler Language",
+    "Explain It",
+    "Explain It (Simply)",
+    "Sharpen the Thesis",
+    "Devil's Advocate",
+    "Diacritics Only",
+    "Translate BHS → English",
+    "Translate English → BHS",
+    "Translate Chinese → English",
+    "Translate English → Chinese",
+    "Translate Chinese → BHS",
+]
+REPHRASE_MODES = _modes_with_headers(REPHRASE_MODES)
+
+_BUILTIN_MODES = [m for m in REPHRASE_MODES if not _is_header(m)]
+
+HOTKEY_OPTIONS = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12"]
+
+N_CTX_OPTIONS = [512, 768, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
+
+_REPHRASE_PROMPTS = {
+    "More Casual": (
+        "Rewrite the following text in a relaxed, conversational tone. "
+        "Keep the same core meaning. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Rephrase Text": (
+        "The writer has put their thoughts down quickly as rough notes and wants them turned into "
+        "coherent, finished prose — WITHOUT it sounding AI-generated. "
+        "Do NOT summarise and do NOT add ideas of your own. Transform the notes into a polished, "
+        "logically structured piece while preserving the writer's original meaning. "
+        "Preserve every argument, example, and concept the writer presents. "
+        "Do NOT introduce new information, interpretations, facts, or claims that are not already there. "
+        "You MAY: reorder sentences and paragraphs so related ideas sit together and the logic builds "
+        "naturally; improve the transitions between ideas; turn incomplete thoughts into complete "
+        "sentences where the intended meaning is clear; remove repetition and unnecessary wordiness; "
+        "and fix grammar, punctuation, and spelling. "
+        "Where a sentence is unclear, infer the most likely intended meaning from the surrounding "
+        "context and rewrite it clearly rather than guessing. "
+        "Preserve the writer's tone, register, and style — do NOT inflate the vocabulary or raise the "
+        "formality. "
+        "Keep the same level of detail as the notes; do NOT simplify the content unless clarity "
+        "genuinely requires it. "
+        "Preserve the conceptual distinctions the writer makes; do NOT replace a technical term with a "
+        "simpler word unless the meaning stays exactly the same. "
+        "Avoid AI-isms and filler: no 'Moreover', 'Furthermore', 'Additionally', 'It is important to "
+        "note', 'In conclusion', no neat three-part lists, no corporate polish. "
+        "Keep it as flowing prose — do NOT add headings, bullet points, or numbered lists. "
+        "The result should read as a finished draft the writer could publish, still recognisably in "
+        "their own voice. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "More Concise": (
+        "Rewrite the following text to be more concise. "
+        "Remove filler words and redundancy while keeping the full meaning. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "More Detailed": (
+        "Expand the following text by adding relevant detail and context "
+        "to make it clearer and more informative. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Simpler Language": (
+        "Rewrite the following text using simpler, everyday language "
+        "that anyone can understand. Keep the same meaning. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Explain It": (
+        "The reader has selected this passage because they hit a wall — the language, concepts, or structure made them want to stop reading. "
+        "Your job is to re-express it so clearly and engagingly that they feel the idea land, understand why it matters, and want to keep going. "
+        "Preserve every argument, claim, and nuance — do not simplify the thinking, only the delivery. "
+        "Replace jargon and abstract nouns with plain language; anchor unfamiliar concepts in concrete, real-world terms. "
+        "Briefly illuminate what the author is actually driving at — the underlying point or stakes — so the reader feels oriented, not just informed. "
+        "Treat the reader as intelligent: curious, capable, just momentarily lost. Never condescend. "
+        "Do not over-summarise or close the idea off — the goal is to send them back into the original text with confidence, not to replace it. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Explain It (Simply)": (
+        "The reader needs this passage explained in plain, everyday language — no jargon, no technical terms, no assumed background knowledge. "
+        "Translate every idea into the kind of words you would use talking to a curious person who has never encountered this subject before. "
+        "For every abstract concept, find a concrete, familiar analogy from everyday life — objects, situations, relationships people already know. "
+        "Keep every idea from the original — do not skip or water down the meaning, only the vocabulary and complexity. "
+        "Use short sentences. Prefer simple words over sophisticated ones at every turn. "
+        "Never talk down to the reader — the goal is clarity and warmth, not simplicity for its own sake. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "More Formal (Academic)": (
+        "Rewrite the following text in a formal academic style. "
+        "Use precise vocabulary and avoid contractions. Keep the same meaning. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Diacritics Only": (
+        "You are a diacritics restoration tool for BHS (Bosnian/Croatian/Serbian). "
+        "Your ONLY task is to restore missing diacritical characters: "
+        "replace 'c' with 'č' or 'ć', 's' with 'š', 'z' with 'ž', 'd' with 'đ' — "
+        "but ONLY where the correct diacritic is unambiguous given the word's meaning and context. "
+        "If a word is ambiguous (e.g. 'kao' — keep as-is), leave it unchanged. "
+        "Do NOT fix grammar. Do NOT change sentence structure. Do NOT rephrase. "
+        "Do NOT change capitalization, punctuation, spacing, or word order. "
+        "Do NOT add or remove any words. "
+        "Return ONLY the text with diacritics restored. No explanation. No extra lines. "
+        "If no diacritics need restoring, return the text exactly as given."
+    ),
+    "Translate BHS → English": (
+        "Translate the following Bosnian, Croatian, or Serbian (BHS) text into natural, fluent English. "
+        "The input may be written without diacritics (š→s, č/ć→c, ž→z, đ→d) — interpret it correctly. "
+        "Do not translate word-for-word, but stay close to the original meaning. "
+        "Use idiomatic, native-sounding phrasing where appropriate. "
+        "Avoid adding new interpretations or changing the intent. "
+        "Preserve tone, emotion, nuance, names, paragraph breaks, and formatting. "
+        "Return ONLY the final English text. No explanation. No extra lines."
+    ),
+    "Translate English → BHS": (
+        "Translate the following English text into natural, fluent Bosnian/Croatian/Serbian (ijekavica standard). "
+        "Do not translate word-for-word, but stay close to the original meaning. "
+        "Use idiomatic, native-sounding phrasing where appropriate. "
+        "Always use correct diacritics (š, č, ć, ž, đ) in the output. "
+        "Avoid adding new interpretations or changing the intent. "
+        "Preserve tone, emotion, nuance, names, paragraph breaks, and formatting. "
+        "Return ONLY the final BHS text. No explanation. No extra lines."
+    ),
+    "Translate Chinese → English": (
+        "Translate the following Chinese text into natural, fluent English. "
+        "The input may be in Simplified or Traditional Chinese — handle both correctly. "
+        "Do not translate word-for-word; find the natural, idiomatic English equivalent. "
+        "Preserve the original tone, register, and intent — do not soften, embellish, or interpret. "
+        "Preserve names, proper nouns, paragraph breaks, and formatting. "
+        "Return ONLY the final English text. No explanation. No extra lines."
+    ),
+    "Translate English → Chinese": (
+        "Translate the following English text into natural, fluent Simplified Chinese (Mandarin). "
+        "Do not translate word-for-word; find the natural, idiomatic Chinese equivalent. "
+        "Use standard Mainland Chinese conventions (Simplified characters, Mandarin vocabulary). "
+        "Preserve the original tone, register, and intent — do not soften, embellish, or interpret. "
+        "Preserve names, proper nouns, paragraph breaks, and formatting. "
+        "Return ONLY the final Chinese text. No explanation. No extra lines."
+    ),
+    "Translate Chinese → BHS": (
+        "Translate the following Chinese text into natural, fluent Bosnian (ijekavica). "
+        "The input may be in Simplified or Traditional Chinese — handle both correctly. "
+        "Do not translate word-for-word; find the natural, idiomatic Bosnian equivalent. "
+        "Use standard Bosnian (ijekavica), not Croatian or Serbian variants where they differ. "
+        "Always use correct Bosnian diacritics (š, č, ć, ž, đ) in the output. "
+        "Preserve the original tone, register, and intent — do not soften, embellish, or interpret. "
+        "Preserve names, proper nouns, paragraph breaks, and formatting. "
+        "Return ONLY the final Bosnian text. No explanation. No extra lines."
+    ),
+    "Diplomatically Worded": (
+        "Rewrite the following text to be more tactful and diplomatic, without losing any of the substance. "
+        "Soften blunt or harsh phrasing, but do not water down the core message or omit uncomfortable truths. "
+        "If the original is critical or negative, keep the critique — just deliver it constructively. "
+        "Avoid corporate filler and empty softeners ('perhaps you might consider'). Be direct but civil. "
+        "Preserve the author's meaning, intent, and all specific details. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Devil's Advocate": (
+        "Rewrite the following text to argue the opposite or most challenging counterposition. "
+        "Steelman the opposing view: make the strongest, most reasonable case against the original argument. "
+        "Do not strawman or mock the original — engage with it seriously. "
+        "Keep the same register and approximate length as the original. "
+        "Do not add a preamble like 'On the other hand' or 'However'. Just make the counter-argument directly. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "Sharpen the Thesis": (
+        "Restructure the following text so the central claim or conclusion leads the paragraph. "
+        "Identify the main point and state it in the first sentence, clearly and specifically — no wind-up, no hedging. "
+        "All supporting points should follow and serve the lead claim. Remove any sentences that do not directly support it. "
+        "Do not add new arguments or facts not already present in the original. "
+        "Preserve the author's voice and vocabulary as much as possible. "
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+}
+
+_FACTORY_PROMPTS = {}
+_FACTORY_PROMPTS.update(_REPHRASE_PROMPTS)
+
+def _resolve_trigger_mode(text: str, triggers: dict) -> tuple[str | None, str]:
+    stripped = text.lstrip()
+    best_mode: str | None = None
+    best_len:  int        = 0
+
+    for mode, trigger in triggers.items():
+        t = trigger.strip()
+        if not t:
+            continue
+        if stripped.lower().startswith(t.lower()):
+            if len(t) > best_len:
+                best_mode = mode
+                best_len  = len(t)
+
+    if best_mode is None:
+        return None, text
+
+    leading_ws = text[: len(text) - len(stripped)]
+    clean = leading_ws + stripped[best_len:].lstrip()
+    return best_mode, clean
+
+def _detect_format_from_path(path: str) -> str | None:
+    name = os.path.basename(path).lower()
+
+    rules = [
+        (r"deepseek",                       "DeepSeek"),
+        (r"llama[-_]?3",                    "Llama 3  (Meta)"),
+        (r"meta[-_]?llama[-_]?3",           "Llama 3  (Meta)"),
+        (r"mi(x|s)tral",                    "Mistral / Mixtral"),
+        (r"gemma",                          "Gemma  (Google)"),
+        (r"zephyr",                         "Zephyr / HF Chat"),
+        (r"command[-_]?r",                  "Command-R  (Cohere)"),
+        (r"cohere",                         "Command-R  (Cohere)"),
+        (r"(alpaca|vicuna)",                "Alpaca / Vicuna"),
+        (r"qwen",                           "ChatML  (Qwen / Phi-3 / Yi)"),
+        (r"phi[-_]?(3|4)",                  "ChatML  (Qwen / Phi-3 / Yi)"),
+        (r"\byi[-_]?\d",                    "ChatML  (Qwen / Phi-3 / Yi)"),
+        (r"internlm",                       "ChatML  (Qwen / Phi-3 / Yi)"),
+        (r"minicpm",                        "ChatML  (Qwen / Phi-3 / Yi)"),
+        (r"llama",                          "Alpaca / Vicuna"),
+    ]
+
+    for pattern, fmt in rules:
+        if re.search(pattern, name):
+            return fmt
+
+    return None
+
+_BHS_ALLOWED = set("šŠčČćĆžŽđĐ")
+
+_CYRILLIC_TO_LATIN = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "ђ": "đ", "е": "e",
+    "ж": "ž", "з": "z", "и": "i", "ј": "j", "к": "k", "л": "l", "љ": "lj",
+    "м": "m", "н": "n", "њ": "nj", "о": "o", "п": "p", "р": "r", "с": "s",
+    "т": "t", "ћ": "ć", "у": "u", "ф": "f", "х": "h", "ц": "c", "ч": "č",
+    "џ": "dž", "ш": "š",
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Ђ": "Đ", "Е": "E",
+    "Ж": "Ž", "З": "Z", "И": "I", "Ј": "J", "К": "K", "Л": "L", "Љ": "Lj",
+    "М": "M", "Н": "N", "Њ": "Nj", "О": "O", "П": "P", "Р": "R", "С": "S",
+    "T": "T", "Ђ": "Đ", "Ћ": "Ć", "У": "U", "Ф": "F", "Х": "H", "Ц": "C", "Ч": "Č",
+    "Џ": "Dž", "Š": "Š",
+}
+
+_BHS_DIACRITIC_WORDS = {
+    "isao": "išao", "dosao": "došao", "nasao": "našao", "prosao": "prošao",
+    "otisao": "otišao", "izasao": "izašao", "usao": "ušao",
+    "dosli": "došli", "nasli": "našli", "prosli": "prošli", "otisli": "otišli",
+    "izasli": "izašli", "dosla": "došla", "nasla": "našla", "prosla": "prošla",
+    "moze": "može", "mozes": "možeš", "mozemo": "možemo", "mozete": "možete",
+    "hoce": "hoće", "hoces": "hoćeš", "hocemo": "hoćemo", "hocete": "hoćete",
+    "nece": "neće", "neces": "nećeš", "necemo": "nećemo", "necete": "nećete",
+    "zelim": "želim", "zelis": "želiš", "zeli": "želi", "zelimo": "želimo",
+    "kaze": "kaže", "kazes": "kažeš", "kazem": "kažem",
+    "ides": "ideš", "imas": "imaš", "znas": "znaš", "gledas": "gledaš",
+    "radis": "radiš", "vidis": "vidiš", "jedes": "jedeš",
+    "cao": "ćao", "sta": "šta", "nesto": "nešto", "nista": "ništa",
+    "svasta": "svašta", "vise": "više", "jos": "još", "vec": "već",
+    "covek": "čovek", "covjek": "čovjek", "zena": "žena", "zene": "žene",
+    "muz": "muž", "noc": "noć", "noci": "noći", "moc": "moć",
+    "pomoc": "pomoć", "caj": "čaj", "cesto": "često", "veceras": "večeras",
+    "vecera": "večera",
+}
+
+_BHS_WORD_RE = re.compile(
+    r"\b(" + "|".join(re.escape(w) for w in sorted(_BHS_DIACRITIC_WORDS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+def _word_count(text: str) -> int:
+    if _CJK_RE.search(text):
+        return len(text)
+    return len(text.split())
+
+def _is_mid_token(sentence: str, punct: str) -> bool:
+    if sentence.count("`") % 2 == 1:
+        return True
+
+    tokens = sentence.split()
+    if not tokens:
+        return False
+    last = tokens[-1]
+
+    if "://" in last:
+        return True
+
+    if last.lower().startswith("www."):
+        return True
+
+    if re.search(r"\w{4,}\.\w{2,6}(?:[/?#]|$)", last):
+        if re.search(r"\w\.\w", last):
+            return True
+
+    if re.search(r"(?:[A-Za-z]:\\|\\\\)", last):
+        return True
+
+    if "\\" in last:
+        return True
+
+    if last.count("/") >= 2:
+        return True
+
+    if re.match(r"^/[^/].*/", last):
+        return True
+
+    if len(re.findall(r"[a-z][A-Z]", last)) >= 2:
+        return True
+
+    if "[" in last:
+        return True
+
+    if "_" in last:
+        return True
+
+    return False

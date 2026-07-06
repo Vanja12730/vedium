@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# Installer build output
+Output/
+
+# Live user config (regenerated from DEFAULT_CFG on first run)
+spell_daemon_config.json
