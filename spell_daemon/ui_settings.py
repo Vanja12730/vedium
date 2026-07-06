@@ -2408,6 +2408,8 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     _mode_triggers, _mode_hotkeys = ui.mode_triggers, ui.mode_hotkeys
 
     _build_appearance_tab(ui)
+    active_scheme_var, font_size_var = ui.active_scheme_var, ui.font_size_var
+    FONT_SIZE_MAP = ui.FONT_SIZE_MAP
 
     # ── Status label + Save button (always visible, outside scroll area) ─────
     # Show the live backend if one is already connected ("None" = not connected).
