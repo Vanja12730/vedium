@@ -888,6 +888,23 @@ def load_model(path: str):
     """
     global _llm, _llm_path, _llm_backend
 
+    # Fail fast with a clear message when llama-cpp-python is missing.
+    # Without this check the GPU attempt fails with ModuleNotFoundError, the
+    # code prints a misleading "falling back to CPU", and the CPU attempt
+    # then fails with the exact same missing-module error.
+    try:
+        import llama_cpp  # noqa: F401
+    except ImportError as exc:
+        msg = (
+            "llama-cpp-python is not installed in this Python "
+            f"({sys.version_info.major}.{sys.version_info.minor}, {sys.executable}) — "
+            "local GGUF models are unavailable. Cloud API and llama-server "
+            "backends are unaffected. Install it with: pip install llama-cpp-python"
+        )
+        diagnostics.record("backend", "error", "Local model backend unavailable.", msg)
+        print(f"[SpellDaemon] {msg}", file=sys.stderr)
+        raise RuntimeError(msg) from exc
+
     cfg = load_cfg()
     gpu_mode = cfg.get("gpu_acceleration", "Auto")
     wants_gpu = gpu_mode in ("Auto", "Full")
