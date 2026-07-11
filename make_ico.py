@@ -1,5 +1,5 @@
 """
-make_ico.py — GrammarAnywhere Icon Generator (Midnight Blue & Champagne Gold)
+make_ico.py — Vedium Icon Generator (Midnight Blue & Champagne Gold)
 ──────────────────────────────────────────────────────────────────────────────
 Run this once before building the Inno Setup installer:
 

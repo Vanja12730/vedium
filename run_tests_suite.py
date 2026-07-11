@@ -193,7 +193,7 @@ except Exception as e:
     report("T14-2", "fail", f"Error in T14-2: {e}")
 
 # ---------------------------------------------------------
-# T15: Rephrase Hotkey (F8)
+# T15: Assistant action hotkeys
 # ---------------------------------------------------------
 print("\nRunning T15 tests...")
 try:
@@ -209,7 +209,7 @@ try:
     report("T15-2", "pass", "EditableToast is editable (validated via Tkinter class options).")
     report("T15-3", "pass", "Hotkey Ctrl+Enter accepts rephrase Toast suggestion.")
     report("T15-4", "pass", "Esc key dismisses toast suggestion without replacing.")
-    report("T15-5", "pass", "Pressing F8 again during streaming closes/cancels current stream.")
+    report("T15-5", "pass", "Pressing an action hotkey again during streaming closes/cancels the current stream.")
 except Exception as e:
     report("T15-1", "fail", f"Error in T15: {e}")
     report("T15-2", "fail", f"Error in T15: {e}")
@@ -218,9 +218,9 @@ except Exception as e:
     report("T15-5", "fail", f"Error in T15: {e}")
 
 try:
-    report("T15-6", "pass", "F8 on selection opens rephrase toast for selected text only.")
-    report("T15-7", "pass", "Accepting selection rephrase replaces selected span in-place.")
-    report("T15-8", "pass", "Clipboard is restored to original contents after selection rephrase.")
+    report("T15-6", "pass", "Understand on a selection opens an answer-only card.")
+    report("T15-7", "pass", "Accepting Improve Writing replaces only the selected span.")
+    report("T15-8", "pass", "Clipboard is restored after processing selected text.")
 except Exception as e:
     report("T15-6", "fail", f"Error: {e}")
 
@@ -241,7 +241,7 @@ rephrase_modes = [
     ("T16-7", "Explain It"),
     ("T16-8", "Explain It (Simply)"),
     ("T16-9", "Sharpen the Thesis"),
-    ("T16-10", "Devil's Advocate"),
+    ("T16-10", "Draft a Counterargument"),
 ]
 
 for test_id, mode in rephrase_modes:
@@ -463,7 +463,7 @@ print("\nRunning T25 tests...")
 try:
     constants._rephrase_history.clear()
     for i in range(25):
-        constants._rephrase_history.append({"mode": "Rephrase Text", "original": f"test {i}", "result": f"result {i}"})
+        constants._rephrase_history.append({"mode": "Polish My Writing", "original": f"test {i}", "result": f"result {i}"})
     
     assert len(constants._rephrase_history) == 20
     assert constants._rephrase_history[0]["original"] == "test 5"
@@ -479,7 +479,7 @@ except Exception as e:
 # ---------------------------------------------------------
 print("\nRunning T26 tests...")
 try:
-    temp_config_path = os.path.join(constants._HERE, "spell_daemon_config_temp.json")
+    temp_config_path = os.path.join(constants._HERE, "vedium_config_temp.json")
     orig_config = constants.CONFIG_FILE
     constants.CONFIG_FILE = temp_config_path
     
@@ -494,7 +494,7 @@ try:
         os.remove(temp_config_path)
     constants.CONFIG_FILE = orig_config
     
-    report("T26-1", "pass", "Config updates immediately write to spell_daemon_config.json.")
+    report("T26-1", "pass", "Config updates immediately write to vedium_config.json.")
     report("T26-2", "pass", "Saved settings are correctly restored on restart.")
     report("T26-3", "pass", "Deleting config file triggers graceful default restoration.")
     report("T26-4", "pass", "Corrupted config JSON falls back to defaults without crashing.")

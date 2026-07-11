@@ -9,7 +9,7 @@ import json
 import difflib
 import unicodedata
 
-from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count
+from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
 from spell_daemon.config import load_cfg
 from spell_daemon.prompt_builder import _build_prompt, _build_chat_prompt
 from spell_daemon import diagnostics
@@ -124,10 +124,10 @@ class _LlamaServerClient:
                 # disabled (just a higher max_tokens cap the model stops short of).
                 _reasoning_model_detected = True
                 if self._think_disable_suffix:
-                    print("[SpellDaemon] Reasoning model detected — thinking disabled by "
+                    print("[Vedium] Reasoning model detected — thinking disabled by "
                           "default (toggle in Settings → server panel).", flush=True)
                 else:
-                    print("[SpellDaemon] Reasoning model detected via /props — thinking budget active.", flush=True)
+                    print("[Vedium] Reasoning model detected via /props — thinking budget active.", flush=True)
         except Exception:
             pass
 
@@ -368,6 +368,7 @@ class _CloudClient:
         temperature: float = 0.1,
         stop=None,
         stream: bool = False,
+        retry_on_empty: bool = True,
     ):
         import urllib.error, json as _json
 
@@ -385,8 +386,28 @@ class _CloudClient:
             try:
                 resp = self._request(payload)
                 data = _json.loads(resp.read())
-                text = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-                return {"choices": [{"text": text or ""}]}
+                choice = (data.get("choices") or [{}])[0]
+                text = (choice.get("message") or {}).get("content") or ""
+                if (_finish_is_length(choice.get("finish_reason"))
+                        and _reasoning_starved_output(text)):
+                    # The token budget ran out before a dependable answer:
+                    # either a server-side thinking model (Gemini-style, hidden
+                    # reasoning eats max_tokens, content comes back empty) or an
+                    # inline thinker (gemma-4-style <thought> blocks) whose
+                    # visible answer got cut off. Reserve the thinking budget
+                    # for all later calls and retry this one.
+                    # (retry_on_empty=False callers — the connect smoke test —
+                    # still flag the model but skip the retry: they don't need
+                    # the text, and the extra request would burn free-tier RPM.)
+                    _flag_hidden_reasoning(self.model, payload["max_tokens"])
+                    if retry_on_empty:
+                        retry = dict(payload,
+                                     max_tokens=payload["max_tokens"] + _THINKING_BUDGET_AUTO)
+                        resp = self._request(retry)
+                        data = _json.loads(resp.read())
+                        choice = (data.get("choices") or [{}])[0]
+                        text = (choice.get("message") or {}).get("content") or ""
+                return {"choices": [{"text": text}]}
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", "replace")
                 raise RuntimeError(_friendly_cloud_error(exc.code, body, self.model)) from exc
@@ -402,6 +423,7 @@ class _CloudClient:
         stop                  = None,
         echo:           bool  = False,
         stream:         bool  = False,
+        retry_on_empty: bool  = True,
     ):
         return self._call_messages(
             _prompt_to_messages(prompt),
@@ -409,6 +431,7 @@ class _CloudClient:
             temperature=temperature,
             stop=stop,
             stream=stream,
+            retry_on_empty=retry_on_empty,
         )
 
     def stream_messages(
@@ -428,13 +451,15 @@ class _CloudClient:
             stream=True,
         )
 
-    def _iter_stream(self, payload):
+    def _iter_stream(self, payload, _is_retry: bool = False):
         import urllib.error, json as _json
         try:
             resp = self._request(payload)
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", "replace")
             raise RuntimeError(_friendly_cloud_error(exc.code, body, self.model)) from exc
+        yielded_text = False
+        finish_reason = None
         try:
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -445,14 +470,24 @@ class _CloudClient:
                     break
                 try:
                     chunk = _json.loads(data)
-                    delta = (chunk.get("choices") or [{}])[0].get("delta", {})
-                    text  = delta.get("content", "")
+                    choice = (chunk.get("choices") or [{}])[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    text = (choice.get("delta") or {}).get("content", "")
                     if text:
+                        yielded_text = True
                         yield {"choices": [{"text": text}]}
                 except _json.JSONDecodeError:
                     pass
         finally:
             resp.close()
+        if not yielded_text and not _is_retry and _finish_is_length(finish_reason):
+            # Same hidden-reasoning signature as the non-stream path: the
+            # budget ran out before any visible text. Flag, bump, retry once.
+            _flag_hidden_reasoning(self.model, payload["max_tokens"])
+            retry = dict(payload,
+                         max_tokens=payload["max_tokens"] + _THINKING_BUDGET_AUTO)
+            yield from self._iter_stream(retry, _is_retry=True)
 
 
 def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192) -> str:
@@ -472,7 +507,11 @@ def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192
 
     client = _CloudClient(base_url, api_key, model, cfg_n_ctx=cfg_n_ctx)
     # Smoke-test: a 1-token completion confirms key + model + endpoint all work.
-    out = client("System: You are a test.\n\nUser: Say hi.", max_tokens=1, temperature=0.0)
+    # retry_on_empty=False: a thinking model returning empty at 1 token is a
+    # PASS (auth and model are proven) — the bigger-budget retry would only
+    # waste a request and up to 2k thinking tokens of free-tier quota.
+    out = client("System: You are a test.\n\nUser: Say hi.", max_tokens=1,
+                 temperature=0.0, retry_on_empty=False)
     if not isinstance(out, dict) or "choices" not in out:
         raise RuntimeError("Unexpected response from cloud API.")
 
@@ -483,7 +522,7 @@ def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192
 
     diagnostics.set_status(backend=_llm_backend, backend_mode="cloud")
     diagnostics.record("backend", "info", f"Connected to cloud model {model}.")
-    print(f"[SpellDaemon] Connected to cloud API {base_url} (model={model})", file=sys.stderr)
+    print(f"[Vedium] Connected to cloud API {base_url} (model={model})", file=sys.stderr)
     return _llm_backend
 
 
@@ -544,6 +583,34 @@ def _is_cloud_quota_error(message: str) -> bool:
             "429",
         )
     )
+
+
+def _is_cloud_server_error(message: str) -> bool:
+    """True when a cloud error is the provider's fault (5xx, overload).
+
+    The first marker matches _friendly_cloud_error's 5xx wording; the rest
+    catch provider messages that reach the caller verbatim ("model is
+    overloaded", "service unavailable", ...). Another model on the favorites
+    list is likely to work, so these are worth failing over."""
+    low = (message or "").lower()
+    return any(
+        marker in low
+        for marker in (
+            "server error",
+            "internal error",
+            "unavailable",
+            "overloaded",
+            "high demand",
+            "try again later",
+        )
+    )
+
+
+def _is_cloud_transient_error(message: str) -> bool:
+    """Errors worth retrying on the next favorite model: quota/rate limits
+    and provider server errors. Anything else (bad key, unknown model, bad
+    request) would fail identically on every model, so it is surfaced."""
+    return _is_cloud_quota_error(message) or _is_cloud_server_error(message)
 
 
 def _normalise_cloud_url(url: str) -> str:
@@ -610,6 +677,172 @@ def _cloud_favorite_fallbacks(cfg: dict | None, current: "_CloudClient") -> list
             "api_key": api_key,
         })
     return result
+
+
+def _activate_cloud_fallback(client: "_CloudClient", favorite: dict, cfg: dict | None) -> None:
+    """Make a successful favorite the live cloud backend for later requests."""
+    global _llm, _llm_path, _llm_backend
+
+    _llm = client
+    _llm_path = f"{client.base_url}::{client.model}"
+    _llm_backend = f"Cloud ({client.model})"
+    if cfg is not None:
+        cfg["backend_mode"] = "cloud"
+        provider = favorite.get("provider", cfg.get("cloud_provider", ""))
+        cfg["cloud_provider"] = provider
+        cfg["cloud_base_url"] = client.base_url
+        cfg["cloud_model"] = client.model
+        cfg["cloud_api_key"] = client.api_key
+        if provider:
+            keys = dict(cfg.get("cloud_api_keys", {}))
+            keys[provider] = client.api_key
+            cfg["cloud_api_keys"] = keys
+    diagnostics.set_status(backend=_llm_backend, backend_mode="cloud")
+    diagnostics.record("backend", "info", f"Switched to fallback cloud model {client.model}.")
+
+
+def _cloud_fallback_targets(cfg: dict | None, current: "_CloudClient") -> list[tuple["_CloudClient", dict | None]]:
+    """Return the current cloud client followed by usable favorites in order."""
+    targets: list[tuple[_CloudClient, dict | None]] = [(current, None)]
+    for favorite in _cloud_favorite_fallbacks(cfg, current):
+        targets.append((
+            _CloudClient(
+                favorite["base_url"], favorite["api_key"], favorite["model"],
+                cfg_n_ctx=max(getattr(current, "_n_ctx", 8192), 8192),
+            ),
+            favorite,
+        ))
+    return targets
+
+
+def _cloud_fallback_error(errors: list[str]) -> RuntimeError:
+    return RuntimeError(
+        "All available favorite cloud models hit a rate limit, quota, or provider error. "
+        f"Tried: {'; '.join(errors)}"
+    )
+
+
+def _record_cloud_failover(model: str, message: str) -> None:
+    reason = ("hit a quota/rate limit" if _is_cloud_quota_error(message)
+              else "had a provider server error")
+    diagnostics.record("backend", "warning",
+                       f"Cloud model {model} {reason}.", message)
+
+
+def _cloud_complete_with_fallback(messages: list, *, max_tokens: int,
+                                  temperature: float, stop=None,
+                                  cfg: dict | None = None, on_fallback=None) -> dict:
+    """Complete once, retrying pre-response quota and provider-server failures."""
+    current = _llm
+    if not isinstance(current, _CloudClient):
+        raise RuntimeError("Cloud fallback requested without a cloud backend.")
+
+    transient_errors = []
+    failed_models = []   # model names verbatim — model ids may themselves contain ":"
+    for index, (client, favorite) in enumerate(_cloud_fallback_targets(cfg, current)):
+        if index and on_fallback:
+            failed_model = failed_models[-1] if failed_models else current.model
+            try:
+                on_fallback(failed_model, client.model)
+            except Exception:
+                pass
+        try:
+            result = client._call_messages(
+                messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
+            )
+            if index:
+                _activate_cloud_fallback(client, favorite or {}, cfg)
+            return result
+        except RuntimeError as exc:
+            message = str(exc)
+            if not _is_cloud_transient_error(message):
+                raise
+            failed_models.append(client.model)
+            transient_errors.append(f"{client.model}: {message}")
+            _record_cloud_failover(client.model, message)
+
+    raise _cloud_fallback_error(transient_errors)
+
+
+def _cloud_stream_with_fallback(messages: list, *, max_tokens: int,
+                                temperature: float, stop=None,
+                                cfg: dict | None = None, on_fallback=None):
+    """Stream a cloud reply, trying favorites after a quota or provider-server
+    failure before any output has been produced.
+
+    Once a model has yielded text, retrying with another model would duplicate or
+    splice together two replies, so that partial-response failure is surfaced.
+    """
+    current = _llm
+    if not isinstance(current, _CloudClient):
+        raise RuntimeError("Cloud fallback requested without a cloud backend.")
+
+    transient_errors = []
+    failed_models = []   # model names verbatim — model ids may themselves contain ":"
+    for index, (client, favorite) in enumerate(_cloud_fallback_targets(cfg, current)):
+        if _stream_cancel.is_set():
+            return
+        if index and on_fallback:
+            failed_model = failed_models[-1] if failed_models else current.model
+            try:
+                on_fallback(failed_model, client.model)
+            except Exception:
+                pass
+        received_reply = False
+        try:
+            for chunk in client.stream_messages(
+                messages, max_tokens=max_tokens, temperature=temperature, stop=stop,
+            ):
+                if _stream_cancel.is_set():
+                    return
+                if index and not received_reply:
+                    _activate_cloud_fallback(client, favorite or {}, cfg)
+                received_reply = True
+                yield chunk
+            return
+        except RuntimeError as exc:
+            message = str(exc)
+            if received_reply or not _is_cloud_transient_error(message):
+                raise
+            failed_models.append(client.model)
+            transient_errors.append(f"{client.model}: {message}")
+            _record_cloud_failover(client.model, message)
+
+    raise _cloud_fallback_error(transient_errors)
+
+
+def _complete_prompt(prompt: str, *, max_tokens: int, temperature: float,
+                     repeat_penalty: float = 1.0, stop=None, echo: bool = False,
+                     cfg: dict | None = None, on_fallback=None) -> dict:
+    """Run one completion, with favorite failover when the live backend is cloud."""
+    client = _llm
+    if isinstance(client, _CloudClient):
+        return _cloud_complete_with_fallback(
+            _prompt_to_messages(prompt), max_tokens=max_tokens,
+            temperature=temperature, stop=stop, cfg=cfg, on_fallback=on_fallback,
+        )
+    return client(
+        prompt, max_tokens=max_tokens, temperature=temperature,
+        repeat_penalty=repeat_penalty, stop=stop, echo=echo,
+    )
+
+
+def _stream_prompt(prompt: str, *, max_tokens: int, temperature: float,
+                   repeat_penalty: float = 1.0, stop=None, echo: bool = False,
+                   cfg: dict | None = None, on_fallback=None):
+    """Stream one prompt, with quota failover for cloud backends."""
+    client = _llm
+    if isinstance(client, _CloudClient):
+        yield from _cloud_stream_with_fallback(
+            _prompt_to_messages(prompt), max_tokens=max_tokens,
+            temperature=temperature, stop=stop, cfg=cfg,
+            on_fallback=on_fallback,
+        )
+        return
+    yield from client(
+        prompt, max_tokens=max_tokens, temperature=temperature,
+        repeat_penalty=repeat_penalty, stop=stop, echo=echo, stream=True,
+    )
 
 
 def fetch_cloud_models(base_url: str, api_key: str, timeout: float = 15.0) -> list:
@@ -702,7 +935,7 @@ def connect_server(url: str, cfg_n_ctx: int = 4096) -> str:
 
     diagnostics.set_status(backend=_llm_backend, backend_mode="server")
     diagnostics.record("backend", "info", f"Connected to local server {url}.")
-    print(f"[SpellDaemon] Connected to llama-server at {url} (n_ctx={client._n_ctx})",
+    print(f"[Vedium] Connected to llama-server at {url} (n_ctx={client._n_ctx})",
           file=sys.stderr)
     return _llm_backend
 
@@ -771,12 +1004,12 @@ def detect_local_server(timeout: float = 0.3, host: str = "127.0.0.1") -> str:
 
     open_ports = [p for p, is_open in zip(_LOCAL_SERVER_PORTS, open_flags) if is_open]
     if open_ports:
-        print(f"[SpellDaemon] Open local ports: {open_ports}", file=sys.stderr)
+        print(f"[Vedium] Open local ports: {open_ports}", file=sys.stderr)
 
     for port in open_ports:
         base = f"http://{host}:{port}"
         if _is_llama_server(base, timeout):
-            print(f"[SpellDaemon] Auto-detected llama-server at {base}", file=sys.stderr)
+            print(f"[Vedium] Auto-detected llama-server at {base}", file=sys.stderr)
             return base
     return ""
 
@@ -902,7 +1135,7 @@ def load_model(path: str):
             "backends are unaffected. Install it with: pip install llama-cpp-python"
         )
         diagnostics.record("backend", "error", "Local model backend unavailable.", msg)
-        print(f"[SpellDaemon] {msg}", file=sys.stderr)
+        print(f"[Vedium] {msg}", file=sys.stderr)
         raise RuntimeError(msg) from exc
 
     cfg = load_cfg()
@@ -911,7 +1144,7 @@ def load_model(path: str):
     n_ctx     = int(cfg.get("n_ctx", 768))
 
     if not wants_gpu:
-        print("[SpellDaemon] GPU acceleration disabled — loading on CPU.", file=sys.stderr)
+        print("[Vedium] GPU acceleration disabled — loading on CPU.", file=sys.stderr)
 
     with _llm_lock:
         if wants_gpu:
@@ -925,10 +1158,14 @@ def load_model(path: str):
                     _llm("Hi", max_tokens=1, echo=False)
                     gpu_backend = _detect_gpu_backend()
                     _llm_backend = f"GPU ({gpu_backend})"
-                    print(f"[SpellDaemon] GPU warmup passed — running on {gpu_backend}.", file=sys.stderr)
+                    _llm_path = path
+                    print(f"[Vedium] GPU warmup passed — running on {gpu_backend}.", file=sys.stderr)
+                    diagnostics.set_status(backend=_llm_backend, backend_mode="local")
+                    diagnostics.record("backend", "info", f"Loaded local model on {_llm_backend}.")
+                    return _llm_backend
                 except Exception as warmup_err:
                     print(
-                        f"[SpellDaemon] GPU warmup failed ({warmup_err}); reloading on CPU.",
+                        f"[Vedium] GPU warmup failed ({warmup_err}); reloading on CPU.",
                         file=sys.stderr,
                     )
                     _llm = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
@@ -940,7 +1177,7 @@ def load_model(path: str):
             except Exception as gpu_error:
                 diagnostics.record("backend", "warning", "GPU load failed; falling back to CPU.", str(gpu_error))
                 print(
-                    f"[SpellDaemon] GPU load failed; falling back to CPU: {gpu_error}",
+                    f"[Vedium] GPU load failed; falling back to CPU: {gpu_error}",
                     file=sys.stderr,
                 )
 
@@ -980,6 +1217,20 @@ def _language_instruction(working_language: str) -> str:
         f"regardless of what language the input is written in. "
         f"If the input is in a different language, translate it to {lang} "
         f"while also correcting any grammar, spelling, or punctuation errors. "
+    )
+
+
+def _answer_language_instruction(_working_language: str) -> str:
+    """
+    Language directive for answer modes (What's This About?, Define This, …).
+
+    Unlike _language_instruction, this controls the language of the ANSWER, not
+    of a rewritten text — so it must not mention translating or correcting the
+    input. Reading modes always answer in the language of the selected text.
+    """
+    return (
+        "Write your complete answer in the same language as the text. "
+        "Do not translate the answer into another language. "
     )
 
 
@@ -1202,6 +1453,42 @@ def _streaming_answer(raw: str) -> tuple:
 _THINKING_BUDGET_AUTO = 2048
 
 
+def _finish_is_length(reason) -> bool:
+    """True when a finish_reason means the token budget was exhausted.
+    OpenAI-compatible providers report "length"; some pass through native
+    variants like Gemini's MAX_TOKENS."""
+    return str(reason or "").strip().lower() in {"length", "max_tokens", "max_output_tokens"}
+
+
+def _reasoning_starved_output(text: str) -> bool:
+    """True when a length-capped completion has no dependable answer.
+
+    Two shapes: nothing visible at all (server-side thinkers burned the budget
+    before emitting content), or reasoning markers in the content (inline
+    thinkers like gemma-4's <thought> blocks) — hitting the cap with a thought
+    block present means the thought or the answer was cut short, so the visible
+    text can't be trusted even when it is non-empty."""
+    if not (text or "").strip():
+        return True
+    return bool(_THINK_OPEN_RE.search(text) or _THINK_CLOSE_RE.search(text)
+                or _THOUGHT_OPEN_RE.search(text) or _THOUGHT_END_RE.search(text))
+
+
+def _flag_hidden_reasoning(model: str, max_tokens: int) -> None:
+    """Mark the backend as a hidden-reasoning model (cloud models whose
+    thinking counts against max_tokens but never appears in the response, so
+    _maybe_flag_reasoning_model's <think>-tag detection can't catch them).
+    Subsequent calls then reserve _THINKING_BUDGET_AUTO via _get_thinking_budget."""
+    global _reasoning_model_detected
+    diagnostics.record_throttled(
+        "backend", "warning",
+        f"{model} ran out of its {max_tokens}-token budget while reasoning; "
+        f"reserving a {_THINKING_BUDGET_AUTO}-token thinking budget and retrying.",
+        cooldown_sec=30.0,
+    )
+    _reasoning_model_detected = True
+
+
 def _get_thinking_budget(cfg: dict | None = None) -> int:
     """Return the number of tokens to reserve for <think> reasoning output.
 
@@ -1356,7 +1643,8 @@ def _capitalize_sentences(text: str) -> str:
     return "".join(chars)
 
 
-def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", deterministic: bool = False, diacritics_only: bool = False) -> str:
+def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", deterministic: bool = False,
+                         diacritics_only: bool = False, cfg: dict | None = None, on_fallback=None) -> str:
     """
     Run the loaded LLM on `text` and return the grammar/spelling-corrected result.
     Returns `text` unchanged if no model is loaded.
@@ -1383,22 +1671,20 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
         lang = (working_language or "Auto").strip()
 
         if diacritics_only:
-            sys_msg = (
-                "You are a diacritics restoration tool for BHS (Bosnian/Croatian/Serbian). "
-                "Your ONLY task is to restore missing diacritical characters: "
-                "replace 'c' with 'č' or 'ć', 's' with 'š', 'z' with 'ž', 'd' with 'đ' — "
-                "but ONLY where the correct diacritic is unambiguous given the word's meaning and context. "
-                "If a word is ambiguous, leave it unchanged. "
-                "Do NOT fix grammar, change structure, rephrase, alter capitalization, punctuation, spacing, or word order. "
-                "Do NOT add or remove any words. "
-                "Return ONLY the text with diacritics restored. No explanation. No extra lines. "
-                "If no diacritics need restoring, return the text exactly as given."
-            )
+            # Single source of truth: the "Diacritics Only" mode prompt in
+            # constants.py (including any user override applied by
+            # _merge_custom_modes) drives both the rephrase mode and this
+            # auto-correct path, so editing the mode in Settings affects both.
+            sys_msg = _REPHRASE_PROMPTS["Diacritics Only"]
             user_msg = f"Restore diacritics only:\n{text}"
             prompt, stop = _build_prompt(fmt, sys_msg, user_msg)
             thinking = _get_thinking_budget()
             max_tok = max(32, _word_count(text) * 2 + 10) + thinking
-            out = _llm(prompt, max_tokens=max_tok, temperature=0.0, repeat_penalty=1.3, stop=stop, echo=False)
+            out = _complete_prompt(
+                prompt, max_tokens=max_tok, temperature=0.0,
+                repeat_penalty=1.3, stop=stop, echo=False, cfg=cfg,
+                on_fallback=on_fallback,
+            )
             raw = out["choices"][0]["text"]
             _maybe_flag_reasoning_model(raw)
             raw = _strip_reasoning(raw)
@@ -1501,10 +1787,11 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
         slack = 40 if (lang != "Auto" and lang not in _SLAVIC_LANGS) else 20
         thinking = _get_thinking_budget()
         max_tok = max(32, _word_count(text) * 3 + slack) + thinking
-        if deterministic:
-            out = _llm(prompt, max_tokens=max_tok, temperature=0.0, repeat_penalty=1.3, stop=stop, echo=False)
-        else:
-            out = _llm(prompt, max_tokens=max_tok, temperature=0.05, repeat_penalty=1.3, stop=stop, echo=False)
+        out = _complete_prompt(
+            prompt, max_tokens=max_tok, temperature=0.0 if deterministic else 0.05,
+            repeat_penalty=1.3, stop=stop, echo=False, cfg=cfg,
+            on_fallback=on_fallback,
+        )
         raw = out["choices"][0]["text"]
         _maybe_flag_reasoning_model(raw)
         raw = _strip_reasoning(raw)
@@ -1555,9 +1842,11 @@ def _calc_rephrase_max_tokens(text: str, sys_msg: str = "") -> int:
     # consumes those tokens before it produces a single word of actual output —
     # failing to account for them squeezes the visible-answer budget to near zero
     # on short inputs (the original Bug 2).
+    # Assigned outside the try: `total` below needs it even when n_ctx is
+    # unreadable and the clamp is skipped.
+    thinking = _get_thinking_budget()
     try:
         n_ctx = _llm.context_params.n_ctx
-        thinking = _get_thinking_budget()
         # Estimate system-prompt token cost from the actual sys_msg when available.
         # Custom modes can have prompts far longer than 175 tokens; using the real
         # length prevents max_tok from being set higher than the context window can
@@ -1578,12 +1867,14 @@ def _calc_rephrase_max_tokens(text: str, sys_msg: str = "") -> int:
     # prompt_overhead already reserves them for context-window safety;
     # adding them here ensures the answer is never crowded out by thinking.
     total = max_tok + thinking
-    print(f"[SpellDaemon] rephrase budget: input_words={input_words}, "
+    print(f"[Vedium] rephrase budget: input_words={input_words}, "
           f"max_tok={max_tok}, thinking={thinking}, total={total}", flush=True)
     return total
 
 
-def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: str = "Auto", deterministic: bool = False, creativity: float = 0.35):
+def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: str = "Auto",
+                             deterministic: bool = False, creativity: float = 0.35,
+                             cfg: dict | None = None, on_fallback=None):
     """
     Run the loaded LLM on `text` and yield rephrased result as raw text chunks.
     The caller is still responsible for final cleanup/safety once all chunks
@@ -1612,34 +1903,48 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
             yield text
             return
 
-        base_msg = _REPHRASE_PROMPTS.get(mode, _REPHRASE_PROMPTS["Diacritics Only"])
+        base_msg = _REPHRASE_PROMPTS.get(mode)
+        if base_msg is None:
+            # A stale mode name (hand-edited config, deleted custom mode still
+            # referenced somewhere) must not silently run an unrelated prompt.
+            diagnostics.record(
+                "llm", "warning",
+                f'Unknown assistant mode "{mode}" — using "Polish My Writing" instead.',
+            )
+            mode = "Polish My Writing"
+            base_msg = _REPHRASE_PROMPTS[mode]
         lang = (working_language or "Auto").strip()
-        if _is_translation_mode(mode):
-            sys_msg = base_msg
-        elif lang == "Auto":
-            sys_msg = base_msg + " " + _language_instruction(working_language)
+        if _is_answer_mode(mode):
+            # Answer modes respond ABOUT the text, so the language directive
+            # governs the answer itself ("explain this in my language") and the
+            # user message must not ask for a rewrite.
+            answer_language = _answer_language_instruction(working_language)
+            sys_msg  = answer_language + base_msg
+            # Repeat the answer-language requirement next to the source text.
+            # This gives smaller local models a clear, recent instruction and
+            # prevents them from defaulting to English or another language.
+            user_msg = f"Text:\n{text}\n\n{answer_language}"
         else:
-            # Prepend the language directive so small models prioritise it over
-            # the rephrase-mode constraints.  _language_instruction() handles the
-            # BHS expansion ("BHS (Bosnian/Croatian/Serbian, ijekavica standard)")
-            # centrally so there is only one place to update if the label changes.
-            sys_msg = _language_instruction(working_language) + base_msg
-        user_msg = f"Rewrite:\n{text}"
+            if _is_translation_mode(mode):
+                sys_msg = base_msg
+            elif lang == "Auto":
+                sys_msg = base_msg + " " + _language_instruction(working_language)
+            else:
+                # Prepend the language directive so small models prioritise it over
+                # the rephrase-mode constraints.  _language_instruction() handles the
+                # BHS expansion ("BHS (Bosnian/Croatian/Serbian, ijekavica standard)")
+                # centrally so there is only one place to update if the label changes.
+                sys_msg = _language_instruction(working_language) + base_msg
+            user_msg = f"Rewrite:\n{text}"
         prompt, stop = _build_prompt(fmt, sys_msg, user_msg)
         max_tok = _calc_rephrase_max_tokens(text, sys_msg)
         temp = 0.0 if deterministic else creativity
 
-        stream = _llm(
-            prompt,
-            max_tokens=max_tok,
-            temperature=temp,
-            repeat_penalty=1.3,
-            stop=stop,
-            echo=False,
-            stream=True,
-        )
         _first_chunk = True
-        for chunk in stream:
+        for chunk in _stream_prompt(
+            prompt, max_tokens=max_tok, temperature=temp, repeat_penalty=1.3,
+            stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
+        ):
             if _stream_cancel.is_set():
                 return
             try:
@@ -1655,7 +1960,8 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
                 yield piece
 
 
-def chat_with_text_stream(text: str, user_instruction: str, fmt: str):
+def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
+                          cfg: dict | None = None, on_fallback=None):
     """
     Apply a free-form user instruction to `text` via the loaded LLM.
     Streams raw text chunks back to the caller.
@@ -1714,16 +2020,10 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str):
         except Exception:
             max_tok = min(max_tok, 2048)
 
-        stream = _llm(
-            prompt,
-            max_tokens=max_tok,
-            temperature=0.35,
-            repeat_penalty=1.3,
-            stop=stop,
-            echo=False,
-            stream=True,
-        )
-        for chunk in stream:
+        for chunk in _stream_prompt(
+            prompt, max_tokens=max_tok, temperature=0.35, repeat_penalty=1.3,
+            stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
+        ):
             if _stream_cancel.is_set():
                 return
             try:
@@ -1793,73 +2093,23 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
 
         if isinstance(_llm, _CloudClient):
             messages = _chat_history_to_messages(sys_msg, history)
-            current_client = _llm
-            cloud_targets = [{"client": current_client}]
-            for fav in _cloud_favorite_fallbacks(cfg, current_client):
-                cloud_targets.append({
-                    "client": _CloudClient(
-                        fav["base_url"],
-                        fav["api_key"],
-                        fav["model"],
-                        cfg_n_ctx=max(getattr(current_client, "_n_ctx", 8192), 8192),
-                    ),
-                    "favorite": fav,
-                })
-
-            quota_errors = []
-            for idx, target in enumerate(cloud_targets):
-                client = target["client"]
-                if idx:
-                    failed_model = quota_errors[-1].split(":", 1)[0] if quota_errors else current_client.model
-                    yield (
-                        f"\n\n[Cloud model '{failed_model}' hit a rate limit or quota. "
-                        f"Trying favorite '{client.model}'...]\n\n"
-                    )
-                    _llm = client
-                    _llm_path = f"{client.base_url}::{client.model}"
-                    _llm_backend = f"Cloud ({client.model})"
-                    if cfg is not None:
-                        fav = target.get("favorite", {})
-                        cfg["backend_mode"] = "cloud"
-                        cfg["cloud_provider"] = fav.get("provider", cfg.get("cloud_provider", ""))
-                        cfg["cloud_base_url"] = client.base_url
-                        cfg["cloud_model"] = client.model
-                    diagnostics.set_status(backend=_llm_backend, backend_mode="cloud")
-                    diagnostics.record("backend", "info", f"Switched to fallback cloud model {client.model}.")
-
+            # Chat has no toast to host the failover notice, so queue the
+            # switch events here and yield them inline into the transcript
+            # ahead of the fallback model's first output.
+            pending_switches: list[tuple[str, str]] = []
+            for chunk in _cloud_stream_with_fallback(
+                messages, max_tokens=max_tok, temperature=0.7, cfg=cfg,
+                on_fallback=lambda failed, nxt: pending_switches.append((failed, nxt)),
+            ):
+                while pending_switches:
+                    failed, nxt = pending_switches.pop(0)
+                    yield f"\n\n[{failed} hit a rate limit or quota — using {nxt} instead]\n\n"
                 try:
-                    stream = client.stream_messages(
-                        messages,
-                        max_tokens=max_tok,
-                        temperature=0.7,
-                    )
-                    for chunk in stream:
-                        if _stream_cancel.is_set():
-                            return
-                        try:
-                            piece = chunk["choices"][0].get("text", "")
-                        except Exception:
-                            piece = ""
-                        if piece:
-                            yield piece
-                    return
-                except RuntimeError as exc:
-                    msg = str(exc)
-                    if _is_cloud_quota_error(msg):
-                        quota_errors.append(f"{client.model}: {msg}")
-                        diagnostics.record(
-                            "backend", "warning",
-                            f"Cloud model {client.model} hit a quota/rate limit.",
-                            msg,
-                        )
-                        continue
-                    raise
-
-            if quota_errors:
-                raise RuntimeError(
-                    "All available favorite cloud models hit a rate limit or quota. "
-                    f"Tried: {'; '.join(quota_errors)}"
-                )
+                    piece = chunk["choices"][0].get("text", "")
+                except Exception:
+                    piece = ""
+                if piece:
+                    yield piece
             return
         else:
             prompt, stop = _build_chat_prompt(fmt, sys_msg, history)

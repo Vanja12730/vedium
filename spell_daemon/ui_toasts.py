@@ -54,17 +54,21 @@ def _apply_windows_decorations(win):
             ctypes.sizeof(c_int)
         )
     except Exception as e:
-        print(f"[SpellDaemon] Win32 decorations failed: {e}", file=sys.stderr)
+        print(f"[Vedium] Win32 decorations failed: {e}", file=sys.stderr)
 
 class _Toast:
     """Compact suggestion popup for automatic spell/grammar fixes."""
-    def __init__(self, original: str, corrected: str, on_accept, on_ignore, label: str = "Spell suggestion", fmt: str = ""):
+    def __init__(self, original: str, corrected: str, on_accept, on_ignore,
+                 label: str = "Spell suggestion", fmt: str = "", cfg: dict | None = None):
         self._original        = original
         self._corrected       = corrected
         self._on_accept       = on_accept
         self._on_ignore       = on_ignore
         self._label           = label
         self._fmt             = fmt or DEFAULT_CFG["prompt_format"]
+        self._cfg             = cfg
+        self._notice_label    = None
+        self._notice_before   = None
         self._trigger_accept  = None   # set by _show; called by global pynput dispatch
         self._trigger_ignore  = None   # set by _show; called by global pynput dispatch
         _ui_call(self._show, wait=True)   # wait=True ensures _trigger_accept/_trigger_ignore are set before __init__ returns
@@ -78,6 +82,23 @@ class _Toast:
         """Dismiss the suggestion via the global keyboard listener (no focus needed)."""
         if self._trigger_ignore:
             _ui_call(self._trigger_ignore, wait=False)
+
+    def show_model_switch(self, failed_model: str, next_model: str):
+        """Show a cloud failover notice without changing the suggestion text."""
+        message = f"⚠  {failed_model} hit a rate limit — using {next_model} instead"
+
+        def _show_notice():
+            label = self._notice_label
+            if label is None:
+                return
+            try:
+                label.config(text=message)
+                if not label.winfo_manager() and self._notice_before is not None:
+                    label.pack(anchor="w", pady=(2, 0), before=self._notice_before)
+            except tk.TclError:
+                pass
+
+        _ui_call(_show_notice, wait=False)
 
     def _show(self):
         root = tk.Toplevel(ui_settings._UI_ROOT)
@@ -112,9 +133,14 @@ class _Toast:
         _current = [self._corrected]
         
         text_widget = tk.Text(body, font=("Georgia", 10 + FONT_SIZE_OFFSET), bg=SURFACE, fg=TEXT,
-                              relief="flat", bd=0, highlightthickness=0, wrap="word",
-                              height=2)
+                               relief="flat", bd=0, highlightthickness=0, wrap="word",
+                               height=2)
         text_widget.pack(fill="x", anchor="w", pady=(4, 6))
+        self._notice_before = text_widget
+        self._notice_label = tk.Label(
+            body, font=FONT_B, bg=SURFACE, fg=WARN, justify="left",
+            wraplength=int(370 * scale),
+        )
 
         # Inline word-diff styling: unchanged text in TEXT, removed words struck
         # through in ERR, added/changed words highlighted in SUCCESS.
@@ -300,7 +326,8 @@ class _Toast:
                 try:
                     chunks = []
                     for piece in chat_with_text_stream(
-                            _current[0], instruction, self._fmt):
+                            _current[0], instruction, self._fmt, cfg=self._cfg,
+                            on_fallback=self.show_model_switch):
                         chunks.append(piece)
                         # Hide chain-of-thought while streaming: show "Thinking…"
                         # until the answer emerges, then render the answer-so-far.
@@ -384,16 +411,28 @@ class _EditableToast:
     """
     Review popup for deliberate rephrasing.
     The suggestion is editable before replacement.
+
+    answer_only=True turns it into an answer card for reading modes
+    (What's This About?, Define This, …): no Replace button — the output is an
+    answer about the text, not a replacement for it — Copy becomes the primary
+    action, and the follow-up chat asks about the ORIGINAL passage rather than
+    editing the shown text.
     """
-    def __init__(self, corrected: str, on_accept, on_ignore, label: str = "Rephrase suggestion", original: str = "", fmt: str = ""):
-        self._corrected = corrected
-        self._original  = original
-        self._on_accept = on_accept
-        self._on_ignore = on_ignore
-        self._label     = label
+    def __init__(self, corrected: str, on_accept, on_ignore, label: str = "Writing suggestion",
+                 original: str = "", fmt: str = "", answer_only: bool = False,
+                 cfg: dict | None = None):
+        self._corrected   = corrected
+        self._original    = original
+        self._on_accept   = on_accept
+        self._on_ignore   = on_ignore
+        self._label       = label
+        self._answer_only = answer_only
         self._fmt       = fmt or DEFAULT_CFG["prompt_format"]
+        self._cfg       = cfg
         self._close_fn   = None   # populated by _show(); enables external dismissal
         self._txt        = None   # populated by _show(); enables streaming updates
+        self._notice_label = None
+        self._notice_before = None
         self._replace_btn = None  # populated by _show(); disabled until streaming ends
         self._stop_btn    = None  # populated by _show(); enabled only while streaming
         _ui_call(self._show, wait=True)   # wait=True ensures _close_fn is set before __init__ returns
@@ -402,6 +441,23 @@ class _EditableToast:
         """Programmatically dismiss this toast (equivalent to clicking Ignore)."""
         if self._close_fn is not None:
             _ui_call(self._close_fn, wait=False)
+
+    def show_model_switch(self, failed_model: str, next_model: str):
+        """Show a cloud failover notice without adding it to the answer text."""
+        message = f"⚠  {failed_model} hit a rate limit — using {next_model} instead"
+
+        def _show_notice():
+            label = self._notice_label
+            if label is None:
+                return
+            try:
+                label.config(text=message)
+                if not label.winfo_manager() and self._notice_before is not None:
+                    label.pack(anchor="w", pady=(2, 6), before=self._notice_before)
+            except tk.TclError:
+                pass
+
+        _ui_call(_show_notice, wait=False)
 
     def set_text(self, text: str, select: bool = False):
         """Replace the editor contents from a worker thread.
@@ -465,9 +521,13 @@ class _EditableToast:
         body = tk.Frame(root, bg=SURFACE, padx=14, pady=10)
         body.pack(fill="both", expand=True)
 
-        tk.Label(body, text=f"✏  {self._label}",
+        icon = "💡" if self._answer_only else "✏"
+        tk.Label(body, text=f"{icon}  {self._label}",
                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"), bg=SURFACE, fg=ACCENT2).pack(anchor="w")
-        tk.Label(body, text="Edit the suggestion below, then choose Replace or Ignore.",
+        hint = ("Read the answer below — copy it or ask a follow-up."
+                if self._answer_only else
+                "Edit the suggestion below, then choose Replace or Ignore.")
+        tk.Label(body, text=hint,
                  font=FONT_B, bg=SURFACE, fg=MUTED).pack(anchor="w", pady=(2, 8))
 
         txt = tk.Text(body, font=("Segoe UI", 10 + FONT_SIZE_OFFSET), bg=BG, fg=TEXT,
@@ -479,6 +539,11 @@ class _EditableToast:
         txt.focus_set()
         txt.tag_add("sel", "1.0", "end-1c")
         self._txt = txt
+        self._notice_before = txt
+        self._notice_label = tk.Label(
+            body, font=FONT_B, bg=SURFACE, fg=WARN, justify="left",
+            wraplength=int(490 * scale),
+        )
 
         btn_row = tk.Frame(body, bg=SURFACE)
         btn_row.pack(anchor="w", pady=(10, 0))
@@ -486,7 +551,9 @@ class _EditableToast:
         closed = {"value": False}
 
         def accept():
-            if closed["value"]:
+            # Answer cards have no Replace: accepting would paste the answer
+            # over the passage the user is reading.
+            if closed["value"] or self._answer_only:
                 return
             # Respect the disabled state even for keyboard shortcuts.
             # _replace_btn is None only if _show() hasn't finished yet, which
@@ -532,12 +599,16 @@ class _EditableToast:
         # Replace button starts disabled — enabled by set_text(..., select=True)
         # once streaming is complete, preventing a mid-stream accept from
         # capturing partial text as the final replacement.
-        replace_btn = tk.Button(btn_row, text="Replace  ✓",
-                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"), bg=ACCENT, fg="white",
-                  relief="flat", padx=10, pady=3, cursor="hand2",
-                  state="disabled",
-                  command=accept)
-        replace_btn.pack(side="left")
+        # Answer cards get no Replace button at all: the answer describes the
+        # passage, it must never be pasted over it (self._replace_btn stays
+        # None, which every _replace_btn access already guards against).
+        replace_btn = None
+        if not self._answer_only:
+            replace_btn = tk.Button(btn_row, text="Replace  ✓",
+                      font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"), bg=ACCENT, fg="white",
+                      relief="flat", padx=10, pady=3, cursor="hand2",
+                      state="disabled",
+                      command=accept)
         self._replace_btn = replace_btn
 
         def _do_stop():
@@ -553,7 +624,6 @@ class _EditableToast:
                   font=FONT_B, bg=WARN, fg="white",
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=_do_stop)
-        stop_btn.pack(side="left", padx=(8, 0))
         self._stop_btn = stop_btn
 
         def _do_copy():
@@ -571,13 +641,24 @@ class _EditableToast:
             copy_btn.config(text="Copied ✓")
             root.after(1500, lambda: copy_btn.config(text="Copy"))
 
+        # On an answer card Copy is the primary (accent-coloured, first) action;
+        # on a rewrite toast it stays secondary after Replace and Stop.
         copy_btn = tk.Button(btn_row, text="Copy",
-                  font=FONT_B, bg=SURF2, fg=TEXT,
+                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold") if self._answer_only else FONT_B,
+                  bg=ACCENT if self._answer_only else SURF2,
+                  fg="white" if self._answer_only else TEXT,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=_do_copy)
-        copy_btn.pack(side="left", padx=(8, 0))
 
-        tk.Button(btn_row, text="Ignore",
+        if self._answer_only:
+            copy_btn.pack(side="left")
+            stop_btn.pack(side="left", padx=(8, 0))
+        else:
+            replace_btn.pack(side="left")
+            stop_btn.pack(side="left", padx=(8, 0))
+            copy_btn.pack(side="left", padx=(8, 0))
+
+        tk.Button(btn_row, text="Close" if self._answer_only else "Ignore",
                   font=FONT_B, bg=SURF2, fg=MUTED,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=ignore).pack(side="left", padx=(8, 0))
@@ -605,16 +686,19 @@ class _EditableToast:
                                state="disabled")
         et_fwd_btn.grid(row=0, column=1, padx=(0, 6))
 
+        _chat_placeholder = (
+            "Ask a follow-up…  (e.g. explain more, give an example)"
+            if self._answer_only else
+            "Ask AI…  (e.g. rephrase that, make it shorter, explain)")
+
         chat_entry = tk.Entry(chat_row, font=FONT_B, bg=BG, fg=MUTED,
                               insertbackground=ACCENT2, relief="flat")
-        chat_entry.insert(0, "Ask AI…  (e.g. rephrase that, make it shorter, explain)")
+        chat_entry.insert(0, _chat_placeholder)
         chat_entry.grid(row=0, column=2, sticky="ew", ipady=4, padx=(0, 6))
 
         send_btn = tk.Button(chat_row, text="Send", font=FONT_B, bg=ACCENT2, fg="white",
                              relief="flat", padx=8, pady=2, cursor="hand2")
         send_btn.grid(row=0, column=3)
-
-        _chat_placeholder = "Ask AI…  (e.g. rephrase that, make it shorter, explain)"
 
         def _et_refresh_nav():
             """Update back/forward button states to match current history position."""
@@ -666,6 +750,13 @@ class _EditableToast:
                     current_text[0] = txt.get("1.0", "end-1c") if self._txt is not None else ""
                 _ui_call(_snap, wait=True)
                 base = current_text[0] or ""
+                # Answer cards: follow-up questions are about the ORIGINAL
+                # passage the reader selected, not about the answer shown in
+                # the editor ("give an example", "explain the second part").
+                # `base` still holds the editor snapshot for history purposes.
+                llm_base = (self._original
+                            if (self._answer_only and self._original)
+                            else base)
 
                 # Disable Replace while the AI is working to prevent mid-stream accepts.
                 def _lock_ui():
@@ -682,7 +773,9 @@ class _EditableToast:
                 try:
                     chunks = []
                     last_render = [None]
-                    for piece in chat_with_text_stream(base, instruction, self._fmt):
+                    for piece in chat_with_text_stream(
+                            llm_base, instruction, self._fmt, cfg=self._cfg,
+                            on_fallback=self.show_model_switch):
                         chunks.append(piece)
                         # Hide chain-of-thought while streaming: show "Thinking…"
                         # until the answer emerges, then render the answer-so-far.
@@ -759,7 +852,10 @@ class _EditableToast:
         chat_entry.bind("<Return>", _send_chat)
 
         root.protocol("WM_DELETE_WINDOW", ignore)
-        root.bind("<Control-Return>", lambda _e: accept())
+        # Ctrl+Enter: Replace on a rewrite toast, Copy on an answer card
+        # (accept() is a guarded no-op there — nothing to replace).
+        root.bind("<Control-Return>",
+                  lambda _e: (_do_copy() if self._answer_only else accept()))
         root.bind("<Escape>", lambda _e: ignore())
 
         # Auto-close after 60 s so the background LLM thread is never blocked forever.
@@ -792,11 +888,11 @@ class _EditableToast:
         root.bind("<Leave>", _on_et_leave, add="+")
 
 
-# ── Recent rephrases popup ────────────────────────────────────────────────────
+# ── Recent Assistant results popup ───────────────────────────────────────────
 
 def _open_recent_rephrases():
     """
-    Open a small window showing the last (up to 3) rephrase results.
+    Open a small window showing the last (up to 3) Assistant results.
     Each entry shows the mode, a snippet of the original text, the full
     rephrased output, and a Copy button so the user can paste it anywhere.
     Accessible via the tray icon right-click menu.
@@ -804,15 +900,15 @@ def _open_recent_rephrases():
     def _show():
         if not _rephrase_history:
             messagebox.showinfo(
-                "Recent Rephrases",
-                "No rephrase results yet.\n\nPress your rephrase hotkey (default F8) "
+                "Recent Assistant Results",
+                "No Assistant results yet.\n\nUse Understand or Improve Writing "
                 "to generate one.",
                 parent=ui_settings._UI_ROOT,
             )
             return
 
         win = tk.Toplevel(ui_settings._UI_ROOT)
-        win.title("Recent Rephrases")
+        win.title("Recent Assistant Results")
         win.attributes("-topmost", True)
         win.configure(bg=BG)
         win.resizable(True, True)
@@ -827,10 +923,10 @@ def _open_recent_rephrases():
 
         header = tk.Frame(win, bg=BG, padx=14, pady=10)
         header.pack(fill="x")
-        tk.Label(header, text="↩  Recent Rephrases",
+        tk.Label(header, text="↩  Recent Assistant Results",
                  font=("Segoe UI", 10 + FONT_SIZE_OFFSET, "bold"), bg=BG, fg=ACCENT2).pack(anchor="w")
         tk.Label(header,
-                 text="Last 3 rephrase results.  Click Copy to grab any of them.",
+                 text="Last 3 Assistant results.  Click Copy to grab any of them.",
                  font=FONT_B, bg=BG, fg=MUTED).pack(anchor="w", pady=(2, 0))
 
         tk.Frame(win, bg=SURF2, height=1).pack(fill="x")

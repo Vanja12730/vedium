@@ -1,4 +1,4 @@
-# Product Finish Plan - GrammarAnywhere / Spell Daemon
+# Product Finish Plan - Vedium (formerly GrammarAnywhere / Spell Daemon)
 
 This plan is aimed at turning the app from a capable power-user utility into a finished product: reliable, understandable, polished, installable, and easy to recover when something goes wrong.
 

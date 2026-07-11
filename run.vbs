@@ -1,4 +1,4 @@
-' run.vbs — Launch GrammarAnywhere without a console window.
+' run.vbs — Launch Vedium without a console window.
 ' Interpreter preference (mirrors run_spell.bat):
 '   1. portable Python bundled by the installer (python\ next to this script)
 '   2. Python 3.12 via the py launcher — the prebuilt GPU llama-cpp-python

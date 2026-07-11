@@ -1,4 +1,4 @@
-# GrammarAnywhere runtime dependencies
+# Vedium runtime dependencies
 #
 # Requires Python 3.10+ with tkinter (included in the python.org installer).
 # Install with:  pip install -r requirements.txt

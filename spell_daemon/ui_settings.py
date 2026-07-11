@@ -10,7 +10,7 @@ from . import constants as c
 from . import llm
 from . import diagnostics
 from .llm import fetch_cloud_models, CLOUD_PROVIDERS, connect_server, detect_local_server, connect_cloud, free_chat_stream, _stream_cancel, _streaming_answer, _strip_reasoning
-from .constants import BG, DEFAULT_CFG, GPU_OPTIONS, N_CTX_OPTIONS, WORKING_LANGUAGE_OPTIONS, REPHRASE_MODES, _BUILTIN_MODES, _FACTORY_PROMPTS, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _OS_RESERVED_HOTKEYS, _OS_RESERVED_HOTKEY_REASONS
+from .constants import BG, DEFAULT_CFG, GPU_OPTIONS, N_CTX_OPTIONS, WORKING_LANGUAGE_OPTIONS, REPHRASE_MODES, _BUILTIN_MODES, _FACTORY_PROMPTS, _is_answer_mode, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _OS_RESERVED_HOTKEYS, _OS_RESERVED_HOTKEY_REASONS
 from .config import (
     save_cfg,
     _merge_custom_modes,
@@ -402,10 +402,10 @@ def _build_status_tab(ui):
                 return "Needs setup", "Add an API key in the Model tab, then click Test & Connect.", WARN
             return "Needs setup", "Choose or test a backend in the Model tab.", WARN
         if mode == "Off":
-            return "Ready, spell check off", "Turn Writing mode to Toast or Auto to get sentence corrections. Rephrase still uses F8.", WARN
+            return "Ready, spell check off", "Turn Writing mode to Toast or Auto to get sentence corrections. Assistant hotkeys still work.", WARN
         if state.get("busy"):
             return "Working", "Wait for the current correction or rephrase to finish.", ACCENT2
-        return "Ready", "Type a sentence, or select text and press the rephrase hotkey.", SUCCESS
+        return "Ready", "Select text to understand it, or use Improve Writing on selected or typed text.", SUCCESS
 
     # One pending refresh at a time.  This function is also invoked directly from
     # button handlers (Clear error / Copy diagnostics); without cancelling the
@@ -720,7 +720,7 @@ def _build_model_tab(ui):
     _add_tooltip(
         remember_toggle,
         "Stores the API key in Windows Credential Manager for your Windows user. "
-        "The key is still stripped from spell_daemon_config.json.",
+        "The key is still stripped from vedium_config.json.",
     )
 
     # Model: an editable dropdown populated from the provider's /models endpoint.
@@ -1083,7 +1083,7 @@ def _build_behaviour_tab(ui):
             selectcolor=SURFACE, relief="flat", cursor="hand2",
         ).pack(anchor="w")
     tk.Label(sc_frame,
-             text="Off lets you type freely and still use the rephrase hotkey (F8)",
+             text="Off disables sentence correction; both Assistant hotkeys still work",
              font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w", pady=(2, 0))
 
     # ── Diacritics-only auto toggle ───────────────────────────────────────────
@@ -1395,7 +1395,7 @@ def _build_setup_tab(ui):
                 setup_vars["writing"].set("Automatic replacement is on.")
                 setup_labels["writing"].config(fg=WARN)
             else:
-                setup_vars["writing"].set("Sentence correction is off. Rephrase still works.")
+                setup_vars["writing"].set("Sentence correction is off. Assistant hotkeys still work.")
                 setup_labels["writing"].config(fg=WARN)
 
             lang = lang_var.get()
@@ -1424,7 +1424,7 @@ def _build_setup_tab(ui):
 
 
 def _build_rephrase_tab(ui):
-    """Build the Rephrase tab: global hotkey capture, default mode,
+    """Build the Assistant tab: action hotkeys, default modes,
     creativity slider, and the mode-prompt manager (add/edit/reset/delete,
     per-mode triggers and hotkeys)."""
     win, cfg = ui.win, ui.cfg
@@ -1432,8 +1432,11 @@ def _build_rephrase_tab(ui):
     frm_rephrase = ui.frm_rephrase
     _bind_scroll = ui.bind_scroll
 
-    # ── Rephrase hotkey capture ───────────────────────────────────────────────
-    hotkey_var = tk.StringVar(master=win, value=cfg.get("rephrase_hotkey", "f8"))
+    # ── Assistant action hotkeys ──────────────────────────────────────────────
+    understand_hotkey_var = tk.StringVar(
+        master=win, value=cfg.get("understand_hotkey", "f8"))
+    writing_hotkey_var = tk.StringVar(
+        master=win, value=cfg.get("writing_hotkey", "f9"))
 
     def _hotkey_display(s: str) -> str:
         """Turn a stored hotkey string into a readable label (e.g. 'f8' → 'F8')."""
@@ -1443,147 +1446,183 @@ def _build_rephrase_tab(ui):
             return s.upper()          # 'a' → 'A', '/' → '/'
         return s[0].upper() + s[1:]   # 'f8' → 'F8', 'insert' → 'Insert'
 
-    lbl_row("Hotkey", 0, frm_rephrase)
+    lbl_row("Hotkeys", 0, frm_rephrase)
     hf = tk.Frame(frm_rephrase, bg=BG)
     hf.grid(row=0, column=1, sticky="w", pady=7)
+    hotkey_vars = {
+        "understand_hotkey": understand_hotkey_var,
+        "writing_hotkey": writing_hotkey_var,
+    }
+    active_capture = [None]
 
-    # Top row: key badge + Change button + hint text
-    hf_controls = tk.Frame(hf, bg=BG)
-    hf_controls.pack(side="top", anchor="w")
+    def _hotkey_control(label: str, hint: str, variable, cfg_key: str):
+        panel = tk.Frame(hf, bg=BG)
+        panel.pack(anchor="w", pady=(0, 8))
+        tk.Label(panel, text=label, font=("Segoe UI", 8, "bold"),
+                 bg=BG, fg=TEXT).pack(anchor="w")
+        controls = tk.Frame(panel, bg=BG)
+        controls.pack(anchor="w", pady=(2, 0))
+        display_var = tk.StringVar(master=win, value=_hotkey_display(variable.get()))
+        badge = tk.Label(controls, textvariable=display_var,
+                         font=("Segoe UI", 9, "bold"), bg=SURF2, fg=TEXT,
+                         relief="groove", anchor="center", padx=10, pady=4)
+        badge.pack(side="left", padx=(0, 10))
+        error_var = tk.StringVar(master=win, value="")
+        error_lbl = tk.Label(panel, textvariable=error_var,
+                             font=("Segoe UI", 8), bg=BG, fg=ERR)
+        capturing = [False]
 
-    hotkey_display_var = tk.StringVar(master=win,
-                                      value=_hotkey_display(cfg.get("rephrase_hotkey", "f8")))
-    # Styled to look like a physical keyboard key in normal state.
-    # _start_capture / _cancel_capture swap bg+fg to signal the active capture state.
-    hotkey_lbl = tk.Label(hf_controls, textvariable=hotkey_display_var,
-                          font=("Segoe UI", 9, "bold"),
-                          bg=SURF2, fg=TEXT, relief="groove",
-                          anchor="center", padx=10, pady=4)
-    hotkey_lbl.pack(side="left", padx=(0, 10))
+        def hide_error():
+            error_lbl.pack_forget()
+            error_var.set("")
 
-    # Error label lives below the controls row; shown only when a bad key is pressed.
-    hotkey_err_var = tk.StringVar(master=win, value="")
-    hotkey_err_lbl = tk.Label(hf, textvariable=hotkey_err_var,
-                               font=("Segoe UI", 8), bg=BG, fg=ERR)
+        def show_error(message: str):
+            error_var.set(message)
+            error_lbl.pack(anchor="w", pady=(3, 0))
+            win.after(2200, hide_error)
 
-    def _show_hotkey_err(msg: str):
-        hotkey_err_var.set(msg)
-        hotkey_err_lbl.pack(side="top", anchor="w", pady=(4, 0))
-        win.after(2200, _hide_hotkey_err)
+        def cancel_capture():
+            capturing[0] = False
+            if active_capture[0] is cancel_capture:
+                active_capture[0] = None
+            display_var.set(_hotkey_display(variable.get()))
+            badge.config(bg=SURF2, fg=TEXT, relief="groove")
+            capture_btn.config(text="Change…", bg=SURFACE)
+            win.unbind("<KeyPress>")
+            hide_error()
 
-    def _hide_hotkey_err():
-        hotkey_err_lbl.pack_forget()
-        hotkey_err_var.set("")
+        def start_capture():
+            if active_capture[0] and active_capture[0] is not cancel_capture:
+                active_capture[0]()
+            active_capture[0] = cancel_capture
+            capturing[0] = True
+            display_var.set("Press a key…")
+            badge.config(bg=ACCENT2, fg="white", relief="flat")
+            capture_btn.config(text="Cancel", bg=WARN)
+            win.bind("<KeyPress>", capture_key)
+            win.focus_set()
 
-    _hk_capturing = [False]
+        def capture_key(event):
+            if not capturing[0]:
+                return
+            keysym = event.keysym
+            if keysym == "Escape":
+                cancel_capture()
+                return "break"
+            if keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R",
+                          "Alt_L", "Alt_R", "Super_L", "Super_R",
+                          "Caps_Lock", "Num_Lock", "Scroll_Lock"):
+                show_error("Modifier keys fire too often — use F1–F12.")
+                return "break"
+            if keysym in ("Return", "Tab", "BackSpace", "Delete", "space"):
+                show_error("This key types text — it can't be used as a hotkey.")
+                return "break"
+            if event.char and event.char.isprintable() and len(event.char) == 1:
+                show_error("Letter keys also type into your app — use F1–F12 or Insert, Pause…")
+                return "break"
+            if keysym.lower() in _OS_RESERVED_HOTKEYS:
+                show_error(_OS_RESERVED_HOTKEY_REASONS.get(
+                    keysym.lower(), f"{keysym} is reserved by the OS."))
+                return "break"
 
-    def _start_capture():
-        _hk_capturing[0] = True
-        hotkey_display_var.set("Press a key…")
-        hotkey_lbl.config(bg=ACCENT2, fg="white", relief="flat")
-        capture_btn.config(text="Cancel", bg=WARN)
-        win.bind("<KeyPress>", _capture_key)
-        win.focus_set()
+            stored = keysym.lower()
+            for other_key, other_var in hotkey_vars.items():
+                if other_key != cfg_key and stored == other_var.get().strip().lower():
+                    show_error("Understand and Improve Writing need different keys.")
+                    return "break"
+            mode_owner = next((name for name, value in cfg.get("mode_hotkeys", {}).items()
+                               if stored == str(value).strip().lower()), "")
+            if mode_owner:
+                show_error(f"That key is already assigned to {mode_owner}.")
+                return "break"
 
-    def _cancel_capture():
-        _hk_capturing[0] = False
-        hotkey_display_var.set(_hotkey_display(hotkey_var.get()))
-        hotkey_lbl.config(bg=SURF2, fg=TEXT, relief="groove")
-        capture_btn.config(text="Change…", bg=SURFACE)
-        win.unbind("<KeyPress>")
-        _hide_hotkey_err()
-
-    def _capture_key(event):
-        if not _hk_capturing[0]:
-            return
-        keysym = event.keysym   # e.g. "F8", "Insert", "a", "slash"
-        # Cancel on Escape; ignore bare modifier keypresses
-        if keysym == "Escape":
-            _cancel_capture()
+            variable.set(stored)
+            cfg[cfg_key] = stored
+            save_cfg(cfg)
+            on_cfg_saved(cfg)
+            diagnostics.record("config", "info", f"{label} set to {_hotkey_display(stored)}.")
+            display_var.set(_hotkey_display(stored))
+            badge.config(bg=SURF2, fg=SUCCESS, relief="groove")
+            capturing[0] = False
+            active_capture[0] = None
+            capture_btn.config(text="Change…", bg=SURFACE)
+            win.unbind("<KeyPress>")
+            hide_error()
+            win.after(900, lambda: badge.config(fg=TEXT))
             return "break"
-        if keysym in ("Shift_L", "Shift_R", "Control_L", "Control_R",
-                      "Alt_L", "Alt_R", "Super_L", "Super_R",
-                      "Caps_Lock", "Num_Lock", "Scroll_Lock"):
-            # Modifier keys fire on every shortcut or capitalised letter, so they
-            # can't be used as a standalone hotkey — use an F-key instead.
-            _show_hotkey_err("Modifier keys fire too often (every Shift, Ctrl, Alt press) — use F1–F12.")
-            return "break"
-        # Warn against keys that would break normal typing
-        if keysym in ("Return", "Tab", "BackSpace", "Delete", "space"):
-            _show_hotkey_err("This key types text — it can't be used as a hotkey.")
-            return "break"
-        # Block bare printable characters (letters, digits, punctuation).
-        # The keyboard listener runs without OS-level suppression, so any
-        # printable key set as a hotkey would ALSO type that character into
-        # whatever app is focused — the rephrase fires and the letter lands.
-        # F-keys and other special keys (Insert, Pause, etc.) do not have
-        # this problem because they produce no printable output in text fields.
-        if event.char and event.char.isprintable() and len(event.char) == 1:
-            _show_hotkey_err("Letter keys also type into your app — use F1–F12 or a special key (Insert, Pause…).")
-            return "break"
-        # Block OS-reserved keys that interfere with the clipboard copy probe.
-        if keysym.lower() in _OS_RESERVED_HOTKEYS:
-            reason = _OS_RESERVED_HOTKEY_REASONS.get(keysym.lower(), f"{keysym} is reserved by the OS.")
-            _show_hotkey_err(reason)
-            return "break"
-        # Use keysym name for all accepted keys (special / function keys only)
-        stored = keysym.lower()   # "f8", "insert", "pause", etc.
-        hotkey_var.set(stored)
-        cfg["rephrase_hotkey"] = stored
-        save_cfg(cfg)
-        on_cfg_saved(cfg)
-        diagnostics.record("config", "info", f"Rephrase hotkey set to {_hotkey_display(stored)}.")
-        hotkey_display_var.set(_hotkey_display(stored))
-        hotkey_lbl.config(bg=SURF2, fg=SUCCESS, relief="groove")
-        _hk_capturing[0] = False
-        capture_btn.config(text="Change…", bg=SURFACE)
-        win.unbind("<KeyPress>")
-        _hide_hotkey_err()
-        # Brief green flash then back to normal colour
-        win.after(900, lambda: hotkey_lbl.config(fg=TEXT))
-        return "break"
 
-    capture_btn = tk.Button(hf_controls, text="Change…", font=FONT_B,
-                            bg=SURFACE, fg=TEXT, relief="flat",
-                            padx=8, cursor="hand2",
-                            command=lambda: _cancel_capture()
-                            if _hk_capturing[0] else _start_capture())
-    capture_btn.pack(side="left", padx=(0, 8))
-    # Hint text on its own line so it doesn't crowd the controls
-    tk.Label(hf, text="Press to rephrase current, last, or selected text",
-             font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(side="top", anchor="w", pady=(4, 0))
+        capture_btn = tk.Button(
+            controls, text="Change…", font=FONT_B, bg=SURFACE, fg=TEXT,
+            relief="flat", padx=8, cursor="hand2",
+            command=lambda: cancel_capture() if capturing[0] else start_capture(),
+        )
+        capture_btn.pack(side="left")
+        tk.Label(panel, text=hint, font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(
+            anchor="w", pady=(3, 0))
 
-    # ── Rephrase mode dropdown ────────────────────────────────────────────────
-    rephrase_var = tk.StringVar(master=win, value=cfg.get("rephrase_mode", "Diacritics Only"))
-    lbl_row("Rephrase mode", 1, frm_rephrase)
+    _hotkey_control(
+        "Understand selected text",
+        "Shows an answer and never replaces the source text.",
+        understand_hotkey_var, "understand_hotkey",
+    )
+    _hotkey_control(
+        "Improve Writing",
+        "Improves selected text, or the current/last text you typed.",
+        writing_hotkey_var, "writing_hotkey",
+    )
+
+    # ── Default modes ─────────────────────────────────────────────────────────
+    reading_rephrase_var = tk.StringVar(
+        master=win, value=cfg.get("rephrase_reading_mode", "What's This About?"))
+    writing_rephrase_var = tk.StringVar(
+        master=win, value=cfg.get("rephrase_writing_mode", "Polish My Writing"))
+    lbl_row("Default modes", 1, frm_rephrase)
     rf = tk.Frame(frm_rephrase, bg=BG)
     rf.grid(row=1, column=1, sticky="w", pady=7)
 
-    def _selectable_rephrase_modes(custom_modes: dict | None = None) -> list[str]:
+    def _reading_rephrase_modes() -> list[str]:
+        return [mode for mode in _BUILTIN_MODES if _is_answer_mode(mode)]
+
+    def _writing_rephrase_modes(custom_modes: dict | None = None) -> list[str]:
         custom_modes = custom_modes if custom_modes is not None else cfg.get("custom_rephrase_modes", {})
         custom_names = [name for name in custom_modes if name not in _BUILTIN_MODES]
-        return list(_BUILTIN_MODES) + custom_names
+        return [mode for mode in _BUILTIN_MODES if not _is_answer_mode(mode)] + custom_names
 
-    rephrase_cb = ttk.Combobox(rf, textvariable=rephrase_var,
-                               values=_selectable_rephrase_modes(),
-                                state="readonly", font=FONT_B, width=24)
-    rephrase_cb.pack(side="left")
-    _bind_scroll(rephrase_cb)
+    def _mode_picker(parent, label, variable, values):
+        panel = tk.Frame(parent, bg=BG)
+        panel.pack(side="left", padx=(0, 14))
+        tk.Label(panel, text=label, font=("Segoe UI", 8, "bold"), bg=BG, fg=MUTED).pack(anchor="w")
+        cb = ttk.Combobox(panel, textvariable=variable, values=values,
+                          state="readonly", font=FONT_B, width=22)
+        cb.pack(anchor="w", pady=(2, 0))
+        _bind_scroll(cb)
+        return cb
 
-    _prev_rephrase = [rephrase_var.get()]
-    def _on_rephrase_pick(event=None):
-        val = rephrase_var.get()
-        if val not in _selectable_rephrase_modes():
-            rephrase_var.set(_prev_rephrase[0])
-        else:
-            _prev_rephrase[0] = val
-            cfg["rephrase_mode"] = val
-            save_cfg(cfg)
-            on_cfg_saved(cfg)
-            diagnostics.record("config", "info", f"Default rephrase mode set to {val}.")
-    rephrase_cb.bind("<<ComboboxSelected>>", _on_rephrase_pick)
-    tk.Label(rf, text="  None = spell-check only",
-             font=FONT_B, bg=BG, fg=MUTED).pack(side="left")
+    reading_cb = _mode_picker(rf, "Reading (selected text)", reading_rephrase_var,
+                              _reading_rephrase_modes())
+    writing_cb = _mode_picker(rf, "Writing (typed text)", writing_rephrase_var,
+                              _writing_rephrase_modes())
+
+    _prev_reading_rephrase = [reading_rephrase_var.get()]
+    _prev_writing_rephrase = [writing_rephrase_var.get()]
+
+    def _on_rephrase_pick(variable, previous, valid_modes, cfg_key, label):
+        val = variable.get()
+        if val not in valid_modes():
+            variable.set(previous[0])
+            return
+        previous[0] = val
+        cfg[cfg_key] = val
+        save_cfg(cfg)
+        on_cfg_saved(cfg)
+        diagnostics.record("config", "info", f"Default {label.lower()} rephrase mode set to {val}.")
+
+    reading_cb.bind("<<ComboboxSelected>>", lambda _event: _on_rephrase_pick(
+        reading_rephrase_var, _prev_reading_rephrase, _reading_rephrase_modes,
+        "rephrase_reading_mode", "Reading"))
+    writing_cb.bind("<<ComboboxSelected>>", lambda _event: _on_rephrase_pick(
+        writing_rephrase_var, _prev_writing_rephrase, _writing_rephrase_modes,
+        "rephrase_writing_mode", "Writing"))
 
     # ── Rephrase creativity slider ────────────────────────────────────────────
     creativity_var = tk.IntVar(master=win,
@@ -1603,12 +1642,13 @@ def _build_rephrase_tab(ui):
     # ── Rephrase mode prompts ─────────────────────────────────────────────────
     tk.Frame(frm_rephrase, bg=SURF2, height=1).grid(
         row=3, column=0, columnspan=2, sticky="ew", pady=(10, 6))
-    tk.Label(frm_rephrase, text="✦  Rephrase Mode Prompts", font=("Segoe UI", 9, "bold"),
+    tk.Label(frm_rephrase, text="✦  Modes", font=("Segoe UI", 9, "bold"),
              bg=BG, fg=ACCENT2).grid(row=4, column=0, columnspan=2, sticky="w",
                                      pady=(2, 2))
     tk.Label(frm_rephrase,
-             text="Select any mode to view or edit its prompt.  "
-                  "Highlighted names have been customised — Reset restores the factory text.",
+             text="Reading modes show an answer about the selected text — nothing is replaced.  "
+                  "Writing modes rewrite the text and offer to replace it.  "
+                  "Select any mode to view or edit its prompt — highlighted names have been customised.",
              font=("Segoe UI", 8), bg=BG, fg=MUTED, wraplength=480, justify="left",
              ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(0, 6))
 
@@ -1622,17 +1662,42 @@ def _build_rephrase_tab(ui):
     cm_frame.grid(row=6, column=0, columnspan=2, sticky="ew", padx=(0, 6), pady=(0, 14))
     cm_frame.columnconfigure(0, weight=1)
 
+    # Two panels side by side: Reading (answer modes) and Writing (rewrite
+    # modes, with translations as a separator-labelled block at the end).
+    # exportselection=False so the two listboxes don't steal each other's
+    # selection via the system selection — exclusivity is handled explicitly
+    # in the select handlers instead.
     lb_frame = tk.Frame(cm_frame, bg=BG)
     lb_frame.grid(row=0, column=0, sticky="ew")
-    lb_frame.columnconfigure(0, weight=1)
-    lb_scroll = tk.Scrollbar(lb_frame, orient="vertical")
-    lb = tk.Listbox(
-        lb_frame, font=FONT_B, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
+    lb_frame.columnconfigure(0, weight=2, uniform="modecols")
+    lb_frame.columnconfigure(1, weight=3, uniform="modecols")
+
+    read_panel = tk.Frame(lb_frame, bg=BG)
+    read_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+    tk.Label(read_panel, text="📖  Reading — shows an answer",
+             font=("Segoe UI", 8, "bold"), bg=BG, fg=ACCENT2).pack(anchor="w", pady=(0, 3))
+    lb_read = tk.Listbox(
+        read_panel, font=FONT_B, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
         selectforeground="white", relief="flat", height=7,
-        yscrollcommand=lb_scroll.set, activestyle="none",
+        activestyle="none", exportselection=False,
     )
-    lb_scroll.config(command=lb.yview)
-    lb.grid(row=0, column=0, sticky="ew")
+    lb_read.pack(fill="both", expand=True)
+
+    write_panel = tk.Frame(lb_frame, bg=BG)
+    write_panel.grid(row=0, column=1, sticky="nsew")
+    tk.Label(write_panel, text="✏  Writing — replaces your text",
+             font=("Segoe UI", 8, "bold"), bg=BG, fg=ACCENT2).pack(anchor="w", pady=(0, 3))
+    write_list_frame = tk.Frame(write_panel, bg=BG)
+    write_list_frame.pack(fill="both", expand=True)
+    write_list_frame.columnconfigure(0, weight=1)
+    lb_scroll = tk.Scrollbar(write_list_frame, orient="vertical")
+    lb_write = tk.Listbox(
+        write_list_frame, font=FONT_B, bg=SURFACE, fg=TEXT, selectbackground=ACCENT,
+        selectforeground="white", relief="flat", height=7,
+        yscrollcommand=lb_scroll.set, activestyle="none", exportselection=False,
+    )
+    lb_scroll.config(command=lb_write.yview)
+    lb_write.grid(row=0, column=0, sticky="nsew")
     lb_scroll.grid(row=0, column=1, sticky="ns")
 
     # Declare buttons early so _refresh_lb / _on_select can reference them.
@@ -1663,43 +1728,81 @@ def _build_rephrase_tab(ui):
             meta += f"  [{badge}]" if meta else f"[{badge}]"
         return f"{name}  ·  {meta}" if meta else name
 
+    def _selected_mode() -> str | None:
+        """Return the mode name selected in either panel, or None.
+        Separator rows ("── … ──") never count as a selection."""
+        for box in (lb_read, lb_write):
+            sel = box.curselection()
+            if sel:
+                label = box.get(sel[0])
+                if label.startswith("──"):
+                    return None
+                return label.split("  ·  ")[0]  # strip trigger/hotkey tag
+        return None
+
     def _refresh_lb():
-        """Repopulate listbox with all modes and sync the rephrase combobox."""
-        # Remember selection by mode name, not raw label (label now includes trigger).
-        sel_raw = lb.get(lb.curselection()[0]) if lb.curselection() else None
-        sel_name = sel_raw.split("  ·  ")[0] if sel_raw else None
-        lb.delete(0, "end")
+        """Repopulate both mode panels and sync the rephrase combobox."""
+        sel_name = _selected_mode()
+
+        reading      = [m for m in _BUILTIN_MODES if _is_answer_mode(m)]
+        writing      = [m for m in _BUILTIN_MODES
+                        if not _is_answer_mode(m) and not m.startswith("Translate ")]
+        translations = [m for m in _BUILTIN_MODES if m.startswith("Translate ")]
+        custom_names = [n for n in _custom if n not in _BUILTIN_MODES]
+
+        lb_read.delete(0, "end")
+        for i, name in enumerate(reading):
+            lb_read.insert("end", _lb_label(name))
+            lb_read.itemconfig(i, fg=ACCENT2 if name in _builtin_overrides else MUTED)
+
+        lb_write.delete(0, "end")
         idx = 0
-        for name in _BUILTIN_MODES:
-            lb.insert("end", _lb_label(name))
-            lb.itemconfig(idx, fg=ACCENT2 if name in _builtin_overrides else MUTED)
+        for name in writing:
+            lb_write.insert("end", _lb_label(name))
+            lb_write.itemconfig(idx, fg=ACCENT2 if name in _builtin_overrides else MUTED)
             idx += 1
-        for name in _custom:
-            lb.insert("end", _lb_label(name))
-            lb.itemconfig(idx, fg=TEXT)
+        for name in custom_names:
+            lb_write.insert("end", _lb_label(name))
+            lb_write.itemconfig(idx, fg=TEXT)
             idx += 1
-        all_names = list(_BUILTIN_MODES) + list(_custom)
-        if sel_name and sel_name in all_names:
-            pos = all_names.index(sel_name)
-            lb.selection_set(pos)
-            lb.see(pos)
+        if translations:
+            lb_write.insert("end", "──  Translation  ──")
+            lb_write.itemconfig(idx, fg=MUTED)
+            idx += 1
+            for name in translations:
+                lb_write.insert("end", _lb_label(name))
+                lb_write.itemconfig(idx, fg=ACCENT2 if name in _builtin_overrides else MUTED)
+                idx += 1
+
+        # Restore selection by mode name in whichever panel now holds it.
+        if sel_name:
+            for box in (lb_read, lb_write):
+                labels = [box.get(i).split("  ·  ")[0] for i in range(box.size())]
+                if sel_name in labels:
+                    pos = labels.index(sel_name)
+                    box.selection_set(pos)
+                    box.see(pos)
+                    break
+
         _merge_custom_modes({**cfg, "custom_rephrase_modes": _custom,
                              "builtin_prompt_overrides": _builtin_overrides})
-        rephrase_modes = _selectable_rephrase_modes(_custom)
-        rephrase_cb["values"] = rephrase_modes
-        if rephrase_var.get() not in rephrase_modes:
-            rephrase_var.set("Rephrase Text")
-            cfg["rephrase_mode"] = "Rephrase Text"
+        reading_cb["values"] = _reading_rephrase_modes()
+        writing_cb["values"] = _writing_rephrase_modes(_custom)
+        if reading_rephrase_var.get() not in _reading_rephrase_modes():
+            reading_rephrase_var.set("What's This About?")
+            cfg["rephrase_reading_mode"] = "What's This About?"
+        if writing_rephrase_var.get() not in _writing_rephrase_modes(_custom):
+            writing_rephrase_var.set("Polish My Writing")
+            cfg["rephrase_writing_mode"] = "Polish My Writing"
         _on_select()
 
     def _on_select(event=None):
-        sel = lb.curselection()
-        if not sel:
+        name = _selected_mode()
+        if name is None:
             edit_btn.config(state="disabled", fg=MUTED)
             reset_btn.config(state="disabled", fg=MUTED)
             delete_btn.config(state="disabled", fg=MUTED)
             return
-        name       = lb.get(sel[0]).split("  ·  ")[0]  # strip trigger tag
         is_builtin = name in _BUILTIN_MODES
         overridden = name in _builtin_overrides
         edit_btn.config(state="normal", fg=TEXT)
@@ -1712,8 +1815,23 @@ def _build_rephrase_tab(ui):
             fg=ERR            if not is_builtin else MUTED,
         )
 
-    lb.bind("<<ListboxSelect>>", _on_select)
-    lb.bind("<Double-Button-1>", lambda _e: _edit_mode())
+    def _on_select_read(event=None):
+        if lb_read.curselection():
+            lb_write.selection_clear(0, "end")
+        _on_select()
+
+    def _on_select_write(event=None):
+        sel = lb_write.curselection()
+        if sel:
+            lb_read.selection_clear(0, "end")
+            if lb_write.get(sel[0]).startswith("──"):  # separator row
+                lb_write.selection_clear(0, "end")
+        _on_select()
+
+    lb_read.bind("<<ListboxSelect>>",  _on_select_read)
+    lb_write.bind("<<ListboxSelect>>", _on_select_write)
+    lb_read.bind("<Double-Button-1>",  lambda _e: _edit_mode())
+    lb_write.bind("<Double-Button-1>", lambda _e: _edit_mode())
     _refresh_lb()
 
     def _sync_mode_cfg(message: str):
@@ -1721,7 +1839,8 @@ def _build_rephrase_tab(ui):
         cfg["builtin_prompt_overrides"] = dict(_builtin_overrides)
         cfg["mode_triggers"]            = dict(_mode_triggers)
         cfg["mode_hotkeys"]             = dict(_mode_hotkeys)
-        cfg["rephrase_mode"]            = rephrase_var.get()
+        cfg["rephrase_reading_mode"]    = reading_rephrase_var.get()
+        cfg["rephrase_writing_mode"]    = writing_rephrase_var.get()
         _merge_custom_modes(cfg)
         save_cfg(cfg)
         on_cfg_saved(cfg)
@@ -1764,7 +1883,7 @@ def _build_rephrase_tab(ui):
         tk.Label(trig_row, text="Trigger phrase", font=("Segoe UI", 9, "bold"),
                  bg=BG, fg=TEXT).pack(anchor="w")
         tk.Label(trig_row,
-                 text="Type this prefix before your text, then press the rephrase hotkey.  "
+                 text="Type this prefix before your text, then press the matching action hotkey.  "
                       "Leave blank to use the mode only from the Settings dropdown.",
                  font=("Segoe UI", 8), bg=BG, fg=MUTED, wraplength=490, justify="left",
                  ).pack(anchor="w")
@@ -1780,8 +1899,8 @@ def _build_rephrase_tab(ui):
         tk.Label(hk_outer, text="Dedicated hotkey", font=("Segoe UI", 9, "bold"),
                  bg=BG, fg=TEXT).pack(anchor="w")
         tk.Label(hk_outer,
-                 text="Press this key anywhere to rephrase using this mode directly.  "
-                      "Leave unset to use the global rephrase hotkey instead.",
+                 text="Press this key anywhere to use this mode directly.  "
+                      "Leave unset to use Understand or Improve Writing instead.",
                  font=("Segoe UI", 8), bg=BG, fg=MUTED, wraplength=490, justify="left",
                  ).pack(anchor="w")
 
@@ -1852,6 +1971,11 @@ def _build_rephrase_tab(ui):
                 _show_hk_err(reason)
                 return "break"
             stored = keysym.lower()
+            if stored in {
+                    understand_hotkey_var.get().strip().lower(),
+                    writing_hotkey_var.get().strip().lower()}:
+                _show_hk_err("That key is already assigned to an Assistant action.")
+                return "break"
             _stored_hk[0] = stored
             _hk_display.set(_hotkey_display(stored))
             hk_badge.config(bg=SURF2, fg=SUCCESS, relief="groove")
@@ -1953,7 +2077,7 @@ def _build_rephrase_tab(ui):
                 del _mode_hotkeys[name]
                 cfg["mode_hotkeys"].pop(name, None)     # live config — takes effect immediately
             _refresh_lb()
-            _sync_mode_cfg(f"Rephrase mode saved: {name}.")
+            _sync_mode_cfg(f"Assistant mode saved: {name}.")
             dlg.destroy()
 
         tk.Button(btn_row, text="Save", font=("Segoe UI", 9, "bold"),
@@ -1970,17 +2094,15 @@ def _build_rephrase_tab(ui):
         _open_mode_dialog(edit_name=None, is_builtin=False)
 
     def _edit_mode():
-        sel = lb.curselection()
-        if not sel:
+        name = _selected_mode()
+        if name is None:
             return
-        name = lb.get(sel[0]).split("  ·  ")[0]  # strip trigger tag
         _open_mode_dialog(edit_name=name, is_builtin=(name in _BUILTIN_MODES))
 
     def _reset_mode():
-        sel = lb.curselection()
-        if not sel:
+        name = _selected_mode()
+        if name is None:
             return
-        name = lb.get(sel[0]).split("  ·  ")[0]  # strip trigger tag
         if name not in _BUILTIN_MODES or name not in _builtin_overrides:
             return
         if not messagebox.askyesno(
@@ -1994,10 +2116,9 @@ def _build_rephrase_tab(ui):
         _sync_mode_cfg(f"Built-in rephrase mode reset: {name}.")
 
     def _delete_mode():
-        sel = lb.curselection()
-        if not sel:
+        name = _selected_mode()
+        if name is None:
             return
-        name = lb.get(sel[0]).split("  ·  ")[0]  # strip trigger/hotkey tag
         if name in _BUILTIN_MODES:
             return
         if not messagebox.askyesno(
@@ -2020,20 +2141,30 @@ def _build_rephrase_tab(ui):
     reset_btn.config(command=_reset_mode)
     delete_btn.config(command=_delete_mode)
 
-    _add_tooltip(lb,
-        "All rephrase modes — built-in and custom.\n"
+    _mode_tooltip = (
         "Highlighted names have been customised; muted names use the factory prompt.\n"
         "Modes with a trigger or hotkey show them after the · separator.\n\n"
         "Double-click or select + Edit Prompt to change a mode's prompt, trigger, or hotkey.\n"
-        "Trigger: type the prefix before your text and press the rephrase hotkey —\n"
+        "Trigger: type the prefix before your text and press the matching action hotkey —\n"
         "the daemon will use that mode for just that one shot, then revert.\n"
-        "Hotkey: press the assigned key directly to rephrase with that mode immediately.\n"
+        "Hotkey: press the assigned key directly to use that mode immediately.\n"
         "Built-in overrides can be undone with Reset.\n"
         "Custom modes can be added with + Add, or removed with Delete."
     )
+    _add_tooltip(lb_read,
+        "Reading modes answer a question about the selected text —\n"
+        "the answer is shown in a card and NEVER replaces the text.\n"
+        "They work on any selection, even a single word.\n\n" + _mode_tooltip
+    )
+    _add_tooltip(lb_write,
+        "Writing modes rewrite the text and offer to replace it.\n"
+        "Custom modes you add appear here.\n\n" + _mode_tooltip
+    )
 
     # ── publish shared state ──────────────────────────────────────────────────
-    ui.hotkey_var, ui.rephrase_var = hotkey_var, rephrase_var
+    ui.understand_hotkey_var = understand_hotkey_var
+    ui.writing_hotkey_var = writing_hotkey_var
+    ui.reading_rephrase_var, ui.writing_rephrase_var = reading_rephrase_var, writing_rephrase_var
     ui.creativity_var = creativity_var
     ui.custom, ui.builtin_overrides = _custom, _builtin_overrides
     ui.mode_triggers, ui.mode_hotkeys = _mode_triggers, _mode_hotkeys
@@ -2150,7 +2281,9 @@ def _build_bottom_bar(ui):
     lang_var, sc_mode_var, diacr_var = ui.lang_var, ui.sc_mode_var, ui.diacr_var
     _trig_string = ui.trig_string
     min_var, idle_var = ui.min_var, ui.idle_var
-    hotkey_var, rephrase_var = ui.hotkey_var, ui.rephrase_var
+    understand_hotkey_var = ui.understand_hotkey_var
+    writing_hotkey_var = ui.writing_hotkey_var
+    reading_rephrase_var, writing_rephrase_var = ui.reading_rephrase_var, ui.writing_rephrase_var
     creativity_var = ui.creativity_var
     _custom, _builtin_overrides = ui.custom, ui.builtin_overrides
     _mode_triggers, _mode_hotkeys = ui.mode_triggers, ui.mode_hotkeys
@@ -2225,8 +2358,10 @@ def _build_bottom_bar(ui):
         cfg["idle_reset_sec"]         = idle_var.get()
         cfg["spell_check_mode"]       = sc_mode_var.get()
         cfg["diacritics_only_auto"]   = diacr_var.get()
-        cfg["rephrase_hotkey"]        = hotkey_var.get()
-        cfg["rephrase_mode"]          = rephrase_var.get()
+        cfg["understand_hotkey"]      = understand_hotkey_var.get()
+        cfg["writing_hotkey"]         = writing_hotkey_var.get()
+        cfg["rephrase_reading_mode"]  = reading_rephrase_var.get()
+        cfg["rephrase_writing_mode"]  = writing_rephrase_var.get()
         cfg["rephrase_creativity"]    = creativity_var.get() / 100
         cfg["n_ctx"]                  = ctx_var.get()
         cfg["colour_scheme"]          = active_scheme_var.get()
@@ -2328,7 +2463,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
 
     win = tk.Toplevel(_UI_ROOT)
     _settings_win = win
-    win.title("Spell Daemon — Settings")
+    win.title("Vedium — Settings")
     win.configure(bg=BG)
     try:
         win.iconbitmap(os.path.join(c._HERE, "app.ico"))
@@ -2442,7 +2577,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
             "Status": "\u23c1",
             "Model": "\u25a1",
             "Behaviour": "\u2637",
-            "Rephrase": "\u201c",
+            "Assistant": "\u201c",
             "Appearance": "\u270e",
         }
         notebook.add(outer, text=f" {tab_icons.get(title, '')} {title} ")
@@ -2500,7 +2635,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     frm_status,     _status_canvas = _make_tab("Status")
     frm_model,      _ = _make_tab("Model")
     frm_behaviour,  _ = _make_tab("Behaviour")
-    frm_rephrase,   _ = _make_tab("Rephrase")
+    frm_rephrase,   _ = _make_tab("Assistant")
     frm_appearance, _ = _make_tab("Appearance")
 
     def _on_tab_change(_event=None):

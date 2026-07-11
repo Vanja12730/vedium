@@ -1,4 +1,4 @@
-"""GrammarAnywhere (spell_daemon) package.
+"""Vedium (spell_daemon) package.
 
 The package is composed of focused submodules that import one another with
 ordinary explicit imports (``from spell_daemon.X import Y``).  Nothing here

@@ -18,6 +18,7 @@ from spell_daemon.constants import (
     FORMATS,
     _is_mid_token,
     _resolve_trigger_mode,
+    _is_answer_mode,
 )
 from spell_daemon.config import load_cfg, save_cfg
 from spell_daemon.buffer import _Buffer
@@ -87,6 +88,18 @@ def _str_to_key(s: str):
         except Exception:
             pass
     return None
+
+
+# Curly quotes the model may swap for straight ones (or vice versa) while
+# changing nothing else — cosmetic noise, not a correction.
+_QUOTE_TRANS = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+
+
+def _noise_normalized(s: str) -> str:
+    """Normalise trivial LLM output noise so a no-op correction compares equal:
+    strips the ends, collapses whitespace runs, and maps curly quotes to
+    straight ones. Any difference that survives this is a real correction."""
+    return re.sub(r"\s+", " ", s.strip()).translate(_QUOTE_TRANS)
 
 
 class SpellDaemon:
@@ -162,13 +175,22 @@ class SpellDaemon:
             return
         idle_sec = self.cfg.get("idle_reset_sec", 30.0)
 
-        # Check rephrase hotkey FIRST — before the try/except routing — so it
-        # fires for any key type (Key.f8, Key.insert, etc.) before the character
-        # routing below has a chance to swallow it.
-        rephrase_key = _str_to_key(self.cfg.get("rephrase_hotkey", "f8"))
-        if rephrase_key is not None and key == rephrase_key:
+        # Understand is deliberately selection-only and can never replace the
+        # source. Improve Writing works on a selection or the typing buffer.
+        understand_key = _str_to_key(self.cfg.get("understand_hotkey", "f8"))
+        if understand_key is not None and key == understand_key:
             threading.Thread(
                 target=self._handle_rephrase_hotkey,
+                kwargs={"action": "understand"},
+                daemon=True,
+            ).start()
+            return
+
+        writing_key = _str_to_key(self.cfg.get("writing_hotkey", "f9"))
+        if writing_key is not None and key == writing_key:
+            threading.Thread(
+                target=self._handle_rephrase_hotkey,
+                kwargs={"action": "write"},
                 daemon=True,
             ).start()
             return
@@ -184,7 +206,10 @@ class SpellDaemon:
             if mk is not None and key == mk:
                 threading.Thread(
                     target=self._handle_rephrase_hotkey,
-                    kwargs={"mode_override": mode_name},
+                    kwargs={
+                        "action": "understand" if _is_answer_mode(mode_name) else "write",
+                        "mode_override": mode_name,
+                    },
                     daemon=True,
                 ).start()
                 return
@@ -203,7 +228,7 @@ class SpellDaemon:
                     self.buf.key_char(c, idle_sec)
                 elif self.cfg.get("spell_check_mode", "Auto") == "Off":
                     # Spell check disabled: record the character normally so the
-                    # buffer keeps accumulating text for the rephrase hotkey,
+                    # buffer keeps accumulating text for Improve Writing,
                     # but skip the correction pipeline entirely.
                     diagnostics.record_throttled(
                         "spell", "info",
@@ -278,11 +303,11 @@ class SpellDaemon:
                 cooldown_sec=5.0,
             )
 
-    def _handle_rephrase_hotkey(self, mode_override: str | None = None):
+    def _handle_rephrase_hotkey(self, action: str, mode_override: str | None = None):
         """
-        F8 behavior (or per-mode hotkey when mode_override is set):
-          1. If text is selected, rephrase the selection.
-          2. Otherwise, rephrase the current/last buffered sentence.
+        Run one explicit assistant action (or a dedicated per-mode hotkey):
+          - understand: require selected text and show an answer card.
+          - write: improve selected text, otherwise the current/last buffer.
 
         mode_override: if provided (by a per-mode hotkey), forces that rephrase mode
         for this single call and skips inline trigger-prefix detection entirely.
@@ -293,7 +318,7 @@ class SpellDaemon:
 
         The lock is held only during the LLM inference phase (before the toast appears).
         Once the toast is visible the lock is released via on_toast_ready so that a
-        subsequent F8 press can close the toast and restart the pipeline.
+        subsequent action-key press can close the toast and restart the pipeline.
         """
         # Non-blocking acquire: if the LLM is still generating (pre-toast phase),
         # drop this keypress rather than queuing a second concurrent operation.
@@ -308,14 +333,18 @@ class SpellDaemon:
                 self._rephrase_hotkey_lock.release()
 
         try:
-            self._handle_rephrase_hotkey_impl(on_toast_ready=release_lock,
+            self._handle_rephrase_hotkey_impl(action, on_toast_ready=release_lock,
                                               mode_override=mode_override)
         finally:
             # Safety net: release the lock here if on_toast_ready was never called
             # (e.g. early-exit paths where no toast is shown).
             release_lock()
 
-    def _handle_rephrase_hotkey_impl(self, on_toast_ready=None, mode_override: str | None = None):
+    def _handle_rephrase_hotkey_impl(self, action: str, on_toast_ready=None,
+                                     mode_override: str | None = None):
+        if action not in ("understand", "write"):
+            raise ValueError(f"Unknown assistant action: {action}")
+
         if self.buf.is_busy_or_pending():
             # Dismiss a visible review toast so the new press replaces it.
             with self._active_rephrase_lock:
@@ -334,48 +363,63 @@ class SpellDaemon:
         previous_clipboard = ""
         triggers = self.cfg.get("mode_triggers", {})
         target_window = _active_window_token()
+        is_understand = action == "understand"
+        default_mode = self.cfg.get(
+            "rephrase_reading_mode" if is_understand else "rephrase_writing_mode",
+            "What's This About?" if is_understand else "Polish My Writing",
+        )
+        # Invalid hand-edited config must not cross the safety boundary.
+        if _is_answer_mode(default_mode) != is_understand:
+            default_mode = "What's This About?" if is_understand else "Polish My Writing"
+
+        def resolve_mode(text: str) -> tuple[str, str]:
+            if mode_override and _is_answer_mode(mode_override) == is_understand:
+                return mode_override, text
+            triggered_mode, clean_text = _resolve_trigger_mode(text, triggers)
+            if triggered_mode and _is_answer_mode(triggered_mode) == is_understand:
+                return triggered_mode, clean_text
+            return default_mode, text
+
         try:
-            # Always probe for a selection: if text is highlighted, rephrase it;
-            # otherwise fall back to the typed-sentence buffer.
+            # Both actions prefer an explicit selection. Understand stops here
+            # if there is none; Improve Writing may fall back to the buffer.
             selected_text, previous_clipboard = _copy_selected_text()
-            if selected_text and _word_count(selected_text) >= self.cfg.get("min_word_count", 2):
-                if mode_override:
-                    # Per-mode hotkey: force the mode; don't scan for a trigger prefix.
-                    effective_mode, clean_selected = mode_override, selected_text
-                else:
-                    # Global hotkey: resolve any inline trigger prefix as usual.
-                    effective_mode, clean_selected = _resolve_trigger_mode(selected_text, triggers)
-                self._selected_rephrase_pipeline(
-                    clean_selected, previous_clipboard,
-                    on_toast_ready=on_toast_ready,
-                    mode_override=effective_mode,
-                    target_window=target_window,
+            if selected_text and selected_text.strip():
+                resolved_mode, clean_selected = resolve_mode(selected_text)
+                # A deliberate selection is valid even when it is one word.
+                if _word_count(clean_selected) >= 1:
+                    self._selected_rephrase_pipeline(
+                        clean_selected, previous_clipboard,
+                        on_toast_ready=on_toast_ready,
+                        mode_override=resolved_mode,
+                        target_window=target_window,
+                    )
+                    return
+
+            if is_understand:
+                diagnostics.record(
+                    "understand", "info",
+                    "Nothing to understand; select text first.",
                 )
+                _info_toast("Select some text first, then press the Understand hotkey.")
                 return
 
             result = self.buf.trigger_rephrase(self.cfg.get("min_word_count", 2))
             if result:
                 sentence, raw_len = result
-                if mode_override:
-                    # Per-mode hotkey: force the mode; don't scan for a trigger prefix.
-                    effective_mode, clean_sentence = mode_override, sentence
-                else:
-                    # Global hotkey: resolve any inline trigger prefix as usual.
-                    effective_mode, clean_sentence = _resolve_trigger_mode(sentence, triggers)
+                resolved_mode, clean_sentence = resolve_mode(sentence)
                 self._rephrase_pipeline(
                     clean_sentence, raw_len,
                     on_toast_ready=on_toast_ready,
-                    mode_override=effective_mode,
+                    mode_override=resolved_mode,
                     target_window=target_window,
                 )
             else:
-                # Nothing to rephrase: no selection and buffer is empty/too short.
-                # Surface a brief status notification so the user knows why nothing happened.
                 diagnostics.record(
                     "rephrase", "info",
-                    "Nothing to rephrase; select text or type a sentence first.",
+                    "Nothing to improve; select text or type a sentence first.",
                 )
-                _info_toast("Nothing to rephrase — select text or type a sentence first.")
+                _info_toast("Nothing to improve — select text or type a sentence first.")
         finally:
             selected_text = None
             previous_clipboard = ""
@@ -402,7 +446,17 @@ class SpellDaemon:
             working_lang   = self.cfg.get("working_language", "Auto")
             is_translation = working_lang.strip() not in ({"Auto"} | _SLAVIC_LANGS)
             diacr_only = self.cfg.get("diacritics_only_auto", False)
-            corrected = spell_check_sentence(sentence, self.cfg.get("prompt_format", FORMATS[0]), working_lang, diacritics_only=diacr_only)
+            # Spell-check is a single non-streaming completion, so a cloud
+            # quota failover happens before any toast exists. Collect the
+            # switches here and show them on the toast once it is up, so the
+            # user knows the suggestion came from a different model than the
+            # one they selected.
+            cloud_switches: list[tuple[str, str]] = []
+            corrected = spell_check_sentence(
+                sentence, self.cfg.get("prompt_format", FORMATS[0]), working_lang,
+                diacritics_only=diacr_only, cfg=self.cfg,
+                on_fallback=lambda failed, nxt: cloud_switches.append((failed, nxt)),
+            )
             corrected = _safe_model_correction(
                 sentence, corrected,
                 is_translation=is_translation,
@@ -439,14 +493,16 @@ class SpellDaemon:
             case_only_fix = (_co != _se and _co.lower() == _se.lower())
 
             # Nothing changed — no replacement needed.
-            # Use a fuzzy threshold (≥97% similar) rather than exact equality so
-            # that trivial model noise (a trailing space, quote normalisation, etc.)
-            # on an already-correct sentence doesn't trigger a spurious toast or
-            # silent replacement.  A real correction (fixing even one word in a
-            # short sentence) drops well below 97%, so genuine fixes still go through.
+            # "No change" means the texts are identical after normalising the
+            # trivial noise models emit on already-correct input (whitespace
+            # runs, curly↔straight quotes) — see _noise_normalized.  A flat
+            # similarity threshold (≥0.97) sat here before, but a one-typo fix
+            # in a sentence of ~9 words or more scores above any flat cutoff
+            # ("recieved"→"received" in 9 words is 0.978), so the most common
+            # genuine corrections were silently discarded as noise.
             sc_mode = self.cfg.get("spell_check_mode", "Auto")
             if not case_only_fix and (
-                corrected == sentence_cmp or _similarity(sentence_cmp, corrected) >= 0.97
+                _noise_normalized(corrected) == _noise_normalized(sentence_cmp)
             ):
                 diagnostics.record("spell", "info", "No correction needed.")
                 self.buf.finalize(replaced=False)
@@ -519,7 +575,10 @@ class SpellDaemon:
                 # the replacement is done — the same pattern used by the silent path.
                 self.buf.set_busy(True)
                 toast = _Toast(sentence + punct, corrected + punct, accept, ignore,
-                               fmt=self.cfg.get("prompt_format", FORMATS[0]))
+                               fmt=self.cfg.get("prompt_format", FORMATS[0]), cfg=self.cfg)
+                if cloud_switches:
+                    # First model that failed → model that actually answered.
+                    toast.show_model_switch(cloud_switches[0][0], cloud_switches[-1][1])
                 with self._active_spell_toast_lock:
                     self._active_spell_toast = toast
                 # timeout=65: 5 s grace over the 9 s auto-close (which hover-protection
@@ -577,13 +636,13 @@ class SpellDaemon:
                              mode_override: str | None = None,
                              target_window: int | None = None):
         """
-        Runs in a background thread when the rephrase hotkey is pressed.
+        Runs in a background thread when Improve Writing is pressed.
         Always shows a toast so the user can review before committing.
         raw_len is the unstripped character count of sentence as it sits in the
         document, used by _do_replace_rephrase for the exact Shift+Left selection.
 
         mode_override: if set (by an inline trigger prefix), overrides the
-        configured rephrase_mode for this single call only.
+        configured writing mode for this single call only.
 
         A try/except wraps the entire body so that any exception from the LLM
         (model crash, OOM, llama.cpp error) still calls buf.finalize(), preventing
@@ -596,11 +655,12 @@ class SpellDaemon:
 
         on_toast_ready: optional callable invoked once the toast is fully populated
         and waiting for user input.  The caller uses this to release the rephrase
-        hotkey lock so that a subsequent F8 press can close the toast and restart.
+        hotkey lock so a subsequent action-key press can close the toast and restart.
         """
         diagnostics.set_status(busy=True)
         try:
-            mode      = mode_override or self.cfg.get("rephrase_mode", "Diacritics Only")
+            mode      = mode_override or self.cfg.get("rephrase_writing_mode", "Polish My Writing")
+            is_answer = _is_answer_mode(mode)
             fmt       = self.cfg.get("prompt_format", FORMATS[0])
             ev        = threading.Event()
             _accepted = [False]
@@ -614,8 +674,9 @@ class SpellDaemon:
             def ignore():
                 ev.set()
 
-            label = f"Rephrase  ({mode})"
-            toast = _EditableToast(_edited[0], accept, ignore, label=label, original=sentence, fmt=fmt)
+            label = mode if is_answer else f"Improve Writing  ({mode})"
+            toast = _EditableToast(_edited[0], accept, ignore, label=label, original=sentence, fmt=fmt,
+                                   answer_only=is_answer, cfg=self.cfg)
             with self._active_rephrase_lock:
                 self._active_rephrase_toast = toast
 
@@ -624,7 +685,8 @@ class SpellDaemon:
             _stream_cancel.clear()
             for chunk in rephrase_sentence_stream(
                     sentence, fmt, mode, self.cfg.get("working_language", "Auto"),
-                    creativity=self.cfg.get("rephrase_creativity", 0.35)):
+                    creativity=self.cfg.get("rephrase_creativity", 0.35), cfg=self.cfg,
+                    on_fallback=toast.show_model_switch):
                 chunks.append(chunk)
                 # Hide chain-of-thought while streaming: show "Thinking…"
                 # until the answer emerges, then render the answer-so-far.
@@ -645,8 +707,10 @@ class SpellDaemon:
                 )
             # The model handles capitalization itself; compare directly against
             # the original to decide whether anything actually changed.
+            # Answer modes skip this: their output is an answer about the text,
+            # so "output == input" is not a meaningful no-op signal.
             sentence_cmp = sentence
-            if corrected == sentence_cmp:
+            if not is_answer and corrected == sentence_cmp:
                 toast.close()
                 with self._active_rephrase_lock:
                     self._active_rephrase_toast = None
@@ -655,7 +719,7 @@ class SpellDaemon:
                 return
 
             # Save to in-memory history so the user can recover a dismissed toast
-            # via the tray "Recent Rephrases…" menu entry.
+            # via the tray "Recent Assistant Results…" menu entry.
             _rephrase_history.appendleft({
                 "text":   corrected,
                 "mode":   mode,
@@ -664,7 +728,7 @@ class SpellDaemon:
 
             toast.set_text(corrected, select=True)
             # LLM is done and the toast is fully populated — release the hotkey lock
-            # so a subsequent F8 press can close this toast and start a fresh rephrase.
+            # so a subsequent action-key press can close this toast and start fresh.
             if on_toast_ready:
                 on_toast_ready()
             # timeout=65: 5 s grace window over the _EditableToast 60 s auto-close.
@@ -715,21 +779,22 @@ class SpellDaemon:
                                      mode_override: str | None = None,
                                      target_window: int | None = None):
         """
-        Rephrase currently selected text, show an editable review box, and replace
-        the selection only if accepted. Selected/replacement text is kept only in
+        Process currently selected text, show a review box, and replace the
+        selection only if accepted. Selected/replacement text is kept only in
         memory during this function and never saved to config or disk.
 
         mode_override: if set (by an inline trigger prefix), overrides the
-        configured rephrase_mode for this single call only.
+        configured reading mode for this single call only.
 
         on_toast_ready: optional callable invoked once the toast is fully populated
         and waiting for user input.  The caller uses this to release the rephrase
-        hotkey lock so that a subsequent F8 press can close the toast and restart.
+        hotkey lock so a subsequent action-key press can close the toast and restart.
         """
         corrected = ""
         diagnostics.set_status(busy=True)
         try:
-            mode = mode_override or self.cfg.get("rephrase_mode", "Diacritics Only")
+            mode = mode_override or self.cfg.get("rephrase_reading_mode", "What's This About?")
+            is_answer = _is_answer_mode(mode)
             fmt  = self.cfg.get("prompt_format", FORMATS[0])
             ev        = threading.Event()
             _accepted = [False]
@@ -743,14 +808,15 @@ class SpellDaemon:
             def ignore():
                 ev.set()
 
-            label = f"Rephrase selected text  ({mode})"
-            toast = _EditableToast(_edited[0], accept, ignore, label=label, original=selected_text, fmt=fmt)
+            label = mode if is_answer else f"Improve selected text  ({mode})"
+            toast = _EditableToast(_edited[0], accept, ignore, label=label, original=selected_text, fmt=fmt,
+                                   answer_only=is_answer, cfg=self.cfg)
             with self._active_rephrase_lock:
                 self._active_rephrase_toast = toast
             # Mark the buffer busy NOW — before the LLM starts — so that
             # is_busy_or_pending() returns True for the entire duration of this
             # pipeline (LLM inference + user review window).  Without this,
-            # _handle_rephrase_hotkey_impl's guard is bypassed on a second F8
+            # _handle_rephrase_hotkey_impl's guard is bypassed on a second action-key press
             # press (the selected-text path never calls trigger_rephrase(), so
             # _pending is never set), allowing a second pipeline to spawn
             # concurrently and leaving the first toast orphaned.  Both pipelines
@@ -763,7 +829,8 @@ class SpellDaemon:
             _stream_cancel.clear()
             for chunk in rephrase_sentence_stream(
                     selected_text, fmt, mode, self.cfg.get("working_language", "Auto"),
-                    creativity=self.cfg.get("rephrase_creativity", 0.35)):
+                    creativity=self.cfg.get("rephrase_creativity", 0.35), cfg=self.cfg,
+                    on_fallback=toast.show_model_switch):
                 chunks.append(chunk)
                 # Hide chain-of-thought while streaming: show "Thinking…"
                 # until the answer emerges, then render the answer-so-far.
@@ -782,7 +849,7 @@ class SpellDaemon:
                 )
 
             # Save to in-memory history so the user can recover a dismissed toast
-            # via the tray "Recent Rephrases…" menu entry.
+            # via the tray "Recent Assistant Results…" menu entry.
             _rephrase_history.appendleft({
                 "text":   corrected,
                 "mode":   mode,
@@ -791,7 +858,7 @@ class SpellDaemon:
 
             toast.set_text(corrected, select=True)
             # LLM is done and the toast is fully populated — release the hotkey lock
-            # so a subsequent F8 press can close this toast and start a fresh rephrase.
+            # so a subsequent action-key press can close this toast and start fresh.
             if on_toast_ready:
                 on_toast_ready()
             ev.wait(timeout=65)
@@ -829,7 +896,7 @@ class SpellDaemon:
             "App enabled." if self.cfg["enabled"] else "App disabled.",
         )
         icon.icon  = _make_icon(self.cfg["enabled"])
-        icon.title = f"Spell Daemon — {'ON' if self.cfg['enabled'] else 'OFF'}"
+        icon.title = f"Vedium — {'ON' if self.cfg['enabled'] else 'OFF'}"
 
     def _open_settings(self, icon, item):
         def _on_cfg_saved(new_cfg: dict):
@@ -847,7 +914,7 @@ class SpellDaemon:
         _open_settings(self.cfg, _on_cfg_saved, load_model)
 
     def _recent_rephrases(self, icon, item):
-        """Tray callback: open the Recent Rephrases recovery popup."""
+        """Tray callback: open the recent Assistant-results recovery popup."""
         _open_recent_rephrases()
 
     def _open_chat(self, icon, item):
@@ -918,7 +985,7 @@ class SpellDaemon:
                 return True
             except Exception as exc:
                 diagnostics.record("backend", "warning", "Configured server unreachable.", str(exc))
-                print(f"[SpellDaemon] Configured server {server_url} unreachable: {exc}",
+                print(f"[Vedium] Configured server {server_url} unreachable: {exc}",
                       file=sys.stderr)
             return False
 
@@ -933,7 +1000,7 @@ class SpellDaemon:
                     return True
                 except Exception as exc:
                     diagnostics.record("backend", "warning", "Auto-detected server failed.", str(exc))
-                    print(f"[SpellDaemon] Auto-detected server {detected} failed: {exc}",
+                    print(f"[Vedium] Auto-detected server {detected} failed: {exc}",
                           file=sys.stderr)
             return False
 
@@ -946,7 +1013,7 @@ class SpellDaemon:
                 return True
             except Exception as exc:
                 diagnostics.record("backend", "warning", "Local model load failed.", str(exc))
-                print(f"[SpellDaemon] Local model load failed: {exc}", file=sys.stderr)
+                print(f"[Vedium] Local model load failed: {exc}", file=sys.stderr)
             return False
 
         def _settings():
@@ -965,7 +1032,7 @@ class SpellDaemon:
                 return
             except Exception as exc:
                 diagnostics.record("backend", "error", "Cloud API connection failed.", str(exc))
-                print(f"[SpellDaemon] Cloud API connection failed: {exc}", file=sys.stderr)
+                print(f"[Vedium] Cloud API connection failed: {exc}", file=sys.stderr)
             # Don't silently fall back to a different backend — the user chose
             # cloud, so surface Settings so they can fix the key/model/network.
             _settings()
@@ -1031,14 +1098,14 @@ class SpellDaemon:
             ),
             pystray.MenuItem("Settings…",          self._open_settings),
             pystray.MenuItem("Chat with AI…",       self._open_chat),
-            pystray.MenuItem("Recent Rephrases…",  self._recent_rephrases),
+            pystray.MenuItem("Recent Assistant Results…", self._recent_rephrases),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",               self._quit),
         )
         self._icon = pystray.Icon(
-            name  = "SpellDaemon",
+            name  = "Vedium",
             icon  = _make_icon(enabled),
-            title = f"Spell Daemon — {'ON' if enabled else 'OFF'}",
+            title = f"Vedium — {'ON' if enabled else 'OFF'}",
             menu  = menu,
         )
         self._icon.run()   # blocks until _quit() calls icon.stop()

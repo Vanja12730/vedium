@@ -69,7 +69,7 @@ def format_snapshot(cfg: dict | None = None) -> str:
     snap = snapshot(cfg)
     state = snap["state"]
     lines = [
-        "GrammarAnywhere diagnostics",
+        "Vedium diagnostics",
         "",
         f"Enabled: {state.get('enabled')}",
         f"Spell-check mode: {state.get('spell_check_mode')}",

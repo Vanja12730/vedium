@@ -6,4 +6,6 @@ __pycache__/
 Output/
 
 # Live user config (regenerated from DEFAULT_CFG on first run)
+vedium_config.json
+# Pre-rename config name, still adopted by the upgrade migration
 spell_daemon_config.json

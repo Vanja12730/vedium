@@ -1,5 +1,5 @@
 ; ─────────────────────────────────────────────────────────────────────────────
-;  GrammarAnywhere.iss  —  Inno Setup 6 installer script
+;  Vedium.iss  —  Inno Setup 6 installer script
 ;
 ;  Produces a single Setup.exe that:
 ;    1. Checks Python is installed and on PATH
@@ -16,12 +16,12 @@
 ;  ────────────
 ;    1. Download and install Inno Setup 6 from https://jrsoftware.org/isinfo.php
 ;    2. Place this file in the same folder as the spell_daemon package and run.vbs
-;    3. Right-click GrammarAnywhere.iss → Compile  (or open in Inno Setup IDE)
-;    4. The finished installer appears as Output\GrammarAnywhereSetup.exe
+;    3. Right-click Vedium.iss → Compile  (or open in Inno Setup IDE)
+;    4. The finished installer appears as Output\VediumSetup.exe
 ;
 ; ─────────────────────────────────────────────────────────────────────────────
 
-#define AppName      "GrammarAnywhere"
+#define AppName      "Vedium"
 #define AppVersion   "1.2"
 #define AppPublisher "Your Name"
 #define AppExeName   "run.vbs"
@@ -36,7 +36,7 @@ AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\{#AppName}
 DisableProgramGroupPage=yes
 OutputDir=Output
-OutputBaseFilename=GrammarAnywhereSetup_v1.2
+OutputBaseFilename=VediumSetup_v1.2
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -77,7 +77,7 @@ Name: "{userdesktop}\{#AppName}";  \
       Parameters: """{app}\{#AppExeName}"""; \
       WorkingDir: "{app}";             \
       IconFilename: "{app}\app.ico";   \
-      Comment: "Start GrammarAnywhere background spell-checker"
+      Comment: "Start Vedium — reading & writing assistant"
 
 [Code]
 // ─────────────────────────────────────────────────────────────────────────────
@@ -225,7 +225,7 @@ begin
 
   Form := TForm.Create(nil);
   try
-    Form.Caption      := 'GrammarAnywhere — Setting up Python';
+    Form.Caption      := 'Vedium — Setting up Python';
     Form.ClientWidth  := ScaleX(460);
     Form.ClientHeight := ScaleY(60);
     Form.Position     := poScreenCenter;
@@ -398,7 +398,7 @@ begin
 
   Form := TForm.Create(nil);
   try
-    Form.Caption      := 'GrammarAnywhere - ' + GroupTitle;
+    Form.Caption      := 'Vedium - ' + GroupTitle;
     Form.ClientWidth  := ScaleX(480);
     Form.ClientHeight := ScaleY(110);
     Form.Position     := poScreenCenter;
@@ -530,7 +530,7 @@ begin
   // word-wrapped description label beneath it.
   Form := TForm.Create(nil);
   try
-    Form.Caption     := 'GrammarAnywhere — AI Engine';
+    Form.Caption     := 'Vedium — AI Engine';
     Form.ClientWidth := ScaleX(600);
     Form.Position    := poScreenCenter;
     Form.BorderStyle := bsDialog;
@@ -833,13 +833,13 @@ begin
       Exit;
     end;
     GInstalledSummary := GInstalledSummary +
-      '  ' + #$2713 + '  Portable Python 3.12  (bundled with GrammarAnywhere)' + #13#10;
+      '  ' + #$2713 + '  Portable Python 3.12  (bundled with Vedium)' + #13#10;
   end;
 
   // ── Step 2: Check remaining requirements with a status window ──────────────
   CheckForm := TForm.Create(nil);
   try
-    CheckForm.Caption      := 'GrammarAnywhere — Checking requirements';
+    CheckForm.Caption      := 'Vedium — Checking requirements';
     CheckForm.ClientWidth  := ScaleX(420);
     CheckForm.ClientHeight := ScaleY(70);
     CheckForm.Position     := poScreenCenter;
@@ -890,7 +890,7 @@ var
   JsonPath: String;
   Json: String;
 begin
-  CfgFile := ExpandConstant('{app}\spell_daemon_config.json');
+  CfgFile := ExpandConstant('{app}\vedium_config.json');
   if FileExists(CfgFile) then Exit;  // never overwrite existing settings
 
   JsonPath := ModelPath;
@@ -952,7 +952,7 @@ begin
 
   Form := TForm.Create(nil);
   try
-    Form.Caption      := 'GrammarAnywhere — Downloading Gemma 3 model';
+    Form.Caption      := 'Vedium — Downloading Gemma 3 model';
     Form.ClientWidth  := ScaleX(480);
     Form.ClientHeight := ScaleY(90);
     Form.Position     := poScreenCenter;
@@ -1115,11 +1115,11 @@ begin
         'Leave "Prompt format" on Auto. Click Save & Load Model.' + #13#10 + #13#10;
 
     MsgBox(
-      'GrammarAnywhere is installed!' + #13#10 + #13#10 +
+      'Vedium is installed!' + #13#10 + #13#10 +
       SummaryBlock +
       ModelBlock +
       '── Getting started ─────────────────────────────────' + #13#10 +
-      'Double-click the GrammarAnywhere shortcut on your Desktop.' + #13#10 +
+      'Double-click the Vedium shortcut on your Desktop.' + #13#10 +
       'A tray icon will appear — right-click it to open Settings.',
       mbInformation, MB_OK);
   end;
@@ -1127,6 +1127,8 @@ end;
 
 [UninstallDelete]
 ; Remove the config file, any launcher variants, and a downloaded model on uninstall
+Type: files; Name: "{app}\vedium_config.json"
+; Pre-rename config name, in case this install was upgraded from GrammarAnywhere
 Type: files; Name: "{app}\spell_daemon_config.json"
 Type: files; Name: "{app}\run.bat"
 ; Models downloaded by the installer (or later by the user) into the app folder

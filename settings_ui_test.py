@@ -39,9 +39,12 @@ def check(name, cond, note=""):
 
 
 # ── Redirect config + stub out anything with side effects ────────────────────
-tmpdir = tempfile.mkdtemp(prefix="ga_harness_")
-tmp_cfg_path = os.path.join(tmpdir, "spell_daemon_config.json")
-shutil.copyfile(c.CONFIG_FILE, tmp_cfg_path)
+tmpdir = tempfile.mkdtemp(prefix="vedium_harness_")
+tmp_cfg_path = os.path.join(tmpdir, "vedium_config.json")
+# The live config may still be under its pre-rename name if the app hasn't
+# run since the Vedium rename — load_cfg() adopts it lazily.
+src_cfg_path = c.CONFIG_FILE if os.path.exists(c.CONFIG_FILE) else c.LEGACY_CONFIG_FILE
+shutil.copyfile(src_cfg_path, tmp_cfg_path)
 c.CONFIG_FILE = tmp_cfg_path
 
 ui_settings.store_cloud_api_key = lambda *a, **k: True
@@ -103,17 +106,22 @@ for i, tab_id in enumerate(tabs):
     nb.select(tab_id)
     win.update()
 tab_texts = [nb.tab(t, "text") for t in tabs]
-for expected in ("Setup", "Status", "Model", "Behaviour", "Rephrase", "Appearance"):
+for expected in ("Setup", "Status", "Model", "Behaviour", "Assistant", "Appearance"):
     check(f"tab '{expected}' exists", any(expected in t for t in tab_texts), str(tab_texts))
 
-# Rephrase mode listbox must show all built-in modes (the old blank-tab bug).
+# The mode panels (Reading + Writing listboxes) must together show every
+# built-in mode (the old blank-tab bug).  Labels may carry trigger/hotkey
+# badges after "  ·  "; separator rows ("── … ──") don't count.
 listboxes = find_widgets(win, tk.Listbox)
-mode_lb = None
+shown_modes = set()
 for lb in listboxes:
-    if lb.size() >= len(c._BUILTIN_MODES):
-        mode_lb = lb
-check("mode listbox populated", mode_lb is not None,
-      f"listbox sizes: {[lb.size() for lb in listboxes]}")
+    for i in range(lb.size()):
+        label = lb.get(i)
+        if not label.startswith("──"):
+            shown_modes.add(label.split("  ·  ")[0])
+missing = [m for m in c._BUILTIN_MODES if m not in shown_modes]
+check("mode panels populated", not missing,
+      f"missing modes: {missing}; listbox sizes: {[lb.size() for lb in listboxes]}")
 
 # ── Press Save & Connect ──────────────────────────────────────────────────────
 save_btns = [b for b in find_widgets(win, tk.Button) if "Save & Connect" in b.cget("text")]

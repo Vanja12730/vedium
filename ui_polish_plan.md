@@ -1,4 +1,4 @@
-# UI Polish Plan — Spell Daemon
+# UI Polish Plan — Vedium (formerly Spell Daemon)
 
 A grounded, incremental plan to make the Settings window and Toasts feel polished
 and "premium" **without a framework rewrite**.

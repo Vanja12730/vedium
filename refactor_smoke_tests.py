@@ -12,7 +12,7 @@ def _parse(path: pathlib.Path) -> ast.Module:
 
 def test_no_launcher_uses_old_monolith() -> None:
     run_vbs = (ROOT / "run.vbs").read_text(encoding="utf-8")
-    installer = (ROOT / "GrammarAnywhere_v2.iss").read_text(encoding="utf-8")
+    installer = (ROOT / "Vedium.iss").read_text(encoding="utf-8")
     assert "spell_daemon.py" not in run_vbs
     assert 'Source: "spell_daemon.py"' not in installer
     assert "-m spell_daemon" in run_vbs
@@ -69,17 +69,32 @@ def test_cloud_test_connect_updates_live_config() -> None:
     assert "API keys are not saved to disk" in source
 
 
-def test_cloud_chat_quota_fallback_and_visible_error() -> None:
+def test_cloud_quota_fallback_is_shared_across_generation_paths() -> None:
     llm_source = (PACKAGE / "llm.py").read_text(encoding="utf-8")
-    ui_source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    daemon_source = (PACKAGE / "daemon.py").read_text(encoding="utf-8")
+    toasts_source = (PACKAGE / "ui_toasts.py").read_text(encoding="utf-8")
 
     assert "def _is_cloud_quota_error" in llm_source
+    assert "def _is_cloud_server_error" in llm_source
+    assert "def _is_cloud_transient_error" in llm_source
     assert "def _cloud_favorite_fallbacks" in llm_source
-    assert "Trying favorite" in llm_source
+    assert "def _cloud_stream_with_fallback" in llm_source
+    assert "def _cloud_complete_with_fallback" in llm_source
+    assert "received_reply or not _is_cloud_transient_error" in llm_source
     assert 'cfg["cloud_model"] = client.model' in llm_source
-    assert "All available favorite cloud models hit a rate limit or quota" in llm_source
-    assert "AI note:" in ui_source
-    assert "str(_exc).strip()" in ui_source
+    assert "All available favorite cloud models hit a rate limit, quota, or provider error" in llm_source
+    assert "cfg=self.cfg" in daemon_source
+    assert "on_fallback=toast.show_model_switch" in daemon_source
+    assert "cfg=self._cfg" in toasts_source
+    assert "on_fallback=self.show_model_switch" in toasts_source
+    # Every path that can switch models must tell the user which model answered:
+    # streaming toasts (show_model_switch), the non-streaming spell toast
+    # (switches collected during spell_check_sentence, shown once the toast is
+    # up), and the chat transcript (inline notice line).
+    assert "using {next_model} instead" in toasts_source
+    assert "cloud_switches.append((failed, nxt))" in daemon_source
+    assert "toast.show_model_switch(cloud_switches[0][0], cloud_switches[-1][1])" in daemon_source
+    assert "using {nxt} instead" in llm_source
 
 
 def test_cloud_api_key_secure_storage() -> None:
@@ -97,6 +112,142 @@ def test_cloud_api_key_secure_storage() -> None:
     assert "Windows Credential Manager" in ui_source
 
 
+def test_tightened_assistant_modes_are_registered() -> None:
+    constants_source = (PACKAGE / "constants.py").read_text(encoding="utf-8")
+
+    modes = constants_source[
+        constants_source.index("REPHRASE_MODES = ["):
+        constants_source.index("REPHRASE_MODES = _modes_with_headers")
+    ]
+    answers = constants_source[
+        constants_source.index("ANSWER_MODES = frozenset"):
+        constants_source.index("def _is_answer_mode")
+    ]
+    prompt = constants_source[
+        constants_source.index('"Explain with Quotes":'):
+        constants_source.index('"More Formal (Academic)":')
+    ]
+
+    assert '"Explain with Quotes"' in modes
+    assert '"Explain with Quotes"' in answers
+    assert "grounded only in the selected passage" in prompt
+    assert "short EXACT quote" in prompt
+    assert "at most two bullet lines" in prompt
+    assert '"Polish My Writing"' in modes
+    assert '"Draft a Counterargument"' in modes
+    assert "Make only changes that improve clarity" in constants_source
+    assert "Do NOT invent facts, evidence" in constants_source
+    assert "Do NOT invent evidence" in constants_source
+
+
+def test_assistant_hotkeys_route_by_explicit_action() -> None:
+    import threading
+    import types
+
+    # Execute the real routing method with dependency-free fakes. Importing the
+    # daemon itself would require pynput, which this zero-install smoke harness
+    # intentionally does not require.
+    tree = _parse(PACKAGE / "daemon.py")
+    spell_daemon = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SpellDaemon"
+    )
+    handler_node = next(
+        node for node in spell_daemon.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_handle_rephrase_hotkey_impl"
+    )
+
+    class FakeBuffer:
+        def __init__(self):
+            self.buffered = None
+            self.trigger_calls = 0
+
+        def is_busy_or_pending(self):
+            return False
+
+        def trigger_rephrase(self, _min_words):
+            self.trigger_calls += 1
+            return self.buffered
+
+    selection = ["A selected passage"]
+    notices = []
+    namespace = {
+        "_active_window_token": lambda: None,
+        "_copy_selected_text": lambda: (selection[0], "old clipboard"),
+        "_info_toast": notices.append,
+        "_is_answer_mode": lambda mode: mode in {
+            "What's This About?", "Define This", "Key Takeaways",
+            "Explain It", "Explain It (Simply)", "Explain with Quotes",
+        },
+        "_resolve_trigger_mode": lambda text, _triggers: (None, text),
+        "_word_count": lambda text: len(text.split()),
+        "diagnostics": types.SimpleNamespace(record=lambda *_args, **_kwargs: None),
+        "time": __import__("time"),
+    }
+    method_module = ast.Module(body=[handler_node], type_ignores=[])
+    ast.fix_missing_locations(method_module)
+    exec(compile(method_module, str(PACKAGE / "daemon.py"), "exec"), namespace)
+    handle = namespace["_handle_rephrase_hotkey_impl"]
+
+    assistant = types.SimpleNamespace()
+    assistant.cfg = {
+        "rephrase_reading_mode": "What's This About?",
+        "rephrase_writing_mode": "Polish My Writing",
+        "mode_triggers": {},
+        "min_word_count": 2,
+    }
+    assistant.buf = FakeBuffer()
+    assistant._active_rephrase_lock = threading.Lock()
+    assistant._active_rephrase_toast = None
+    calls = []
+    assistant._selected_rephrase_pipeline = lambda text, _clipboard, **kwargs: calls.append(
+        ("selected", text, kwargs["mode_override"]))
+    assistant._rephrase_pipeline = lambda text, _raw_len, **kwargs: calls.append(
+        ("buffer", text, kwargs["mode_override"]))
+
+    handle(assistant, "understand")
+    assert calls == [("selected", "A selected passage", "What's This About?")]
+    assert assistant.buf.trigger_calls == 0
+
+    calls.clear()
+    handle(assistant, "write")
+    assert calls == [("selected", "A selected passage", "Polish My Writing")]
+
+    calls.clear()
+    selection[0] = ""
+    assistant.buf.buffered = ("Recently typed draft", 20)
+    handle(assistant, "write")
+    assert calls == [("buffer", "Recently typed draft", "Polish My Writing")]
+
+    calls.clear()
+    assistant.buf.trigger_calls = 0
+    handle(assistant, "understand")
+    assert calls == []
+    assert assistant.buf.trigger_calls == 0
+    assert notices and "Select some text first" in notices[-1]
+
+    calls.clear()
+    selection[0] = "Selected again"
+    handle(assistant, "understand", mode_override="Polish My Writing")
+    assert calls == [("selected", "Selected again", "What's This About?")]
+
+
+def test_legacy_hotkey_and_mode_migration_exists() -> None:
+    constants_source = (PACKAGE / "constants.py").read_text(encoding="utf-8")
+    config_source = (PACKAGE / "config.py").read_text(encoding="utf-8")
+    daemon_source = (PACKAGE / "daemon.py").read_text(encoding="utf-8")
+
+    assert '"understand_hotkey":' in constants_source
+    assert '"writing_hotkey":' in constants_source
+    assert 'self.cfg.get("understand_hotkey", "f8")' in daemon_source
+    assert 'self.cfg.get("writing_hotkey", "f9")' in daemon_source
+    assert 'kwargs={"action": "understand"}' in daemon_source
+    assert 'kwargs={"action": "write"}' in daemon_source
+    assert 'legacy_hotkey = cfg.get("rephrase_hotkey", "")' in config_source
+    assert 'cfg.pop("rephrase_hotkey", None)' in config_source
+    assert '"Rephrase Text": "Polish My Writing"' in config_source
+
+
 def main() -> int:
     tests = [
         test_no_launcher_uses_old_monolith,
@@ -106,8 +257,11 @@ def main() -> int:
         test_settings_spell_mode_labels_are_valid_unicode,
         test_backend_unavailable_message_exists,
         test_cloud_test_connect_updates_live_config,
-        test_cloud_chat_quota_fallback_and_visible_error,
+        test_cloud_quota_fallback_is_shared_across_generation_paths,
         test_cloud_api_key_secure_storage,
+        test_tightened_assistant_modes_are_registered,
+        test_assistant_hotkeys_route_by_explicit_action,
+        test_legacy_hotkey_and_mode_migration_exists,
     ]
     failed = 0
     for test in tests:

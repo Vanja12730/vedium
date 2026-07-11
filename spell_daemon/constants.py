@@ -20,7 +20,10 @@ _OS_RESERVED_HOTKEY_REASONS = {
 
 # _HERE points to the refactored directory (where the launcher is)
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_FILE = os.path.join(_HERE, "spell_daemon_config.json")
+CONFIG_FILE = os.path.join(_HERE, "vedium_config.json")
+# Pre-rename config file (the app used to be SpellDaemon/GrammarAnywhere);
+# load_cfg() adopts it as CONFIG_FILE on the first run after the upgrade.
+LEGACY_CONFIG_FILE = os.path.join(_HERE, "spell_daemon_config.json")
 
 _rephrase_history = collections.deque(maxlen=20)
 
@@ -45,8 +48,10 @@ DEFAULT_CFG = {
     "enabled":                True,
     "min_word_count":         2,
     "max_wait_sec":           12,
-    "rephrase_hotkey":        "f8",
-    "rephrase_mode":          "Rephrase Text",
+    "understand_hotkey":      "f8",
+    "writing_hotkey":         "f9",
+    "rephrase_reading_mode":  "What's This About?",
+    "rephrase_writing_mode":  "Polish My Writing",
     "rephrase_creativity":    0.35,
     "idle_reset_sec":         30.0,
     "n_ctx":                  768,
@@ -175,14 +180,18 @@ def _is_header(mode: str) -> bool:
     return mode.startswith("──")
 
 def _modes_with_headers(flat_modes: list[str]) -> list[str]:
+    # Two coarse groups mirroring the Reading/Writing panels in Settings.
+    # Custom modes (not in either set) are appended after the Writing group,
+    # translations get their own trailing group.
     _GROUPS = [
-        ("── Style & Tone ──",
-         {"More Casual", "More Formal (Academic)", "Diplomatically Worded"}),
-        ("── Structure & Clarity ──",
-         {"More Concise", "More Detailed", "Simpler Language",
-          "Explain It", "Explain It (Simply)", "Sharpen the Thesis", "Devil's Advocate"}),
-        ("── Correction ──",
-         {"Diacritics Only"}),
+        ("── Reading (answers) ──",
+         {"What's This About?", "Define This", "Key Takeaways",
+          "Explain It", "Explain It (Simply)", "Explain with Quotes"}),
+        ("── Writing (replaces) ──",
+         {"Polish My Writing", "More Casual", "More Formal (Academic)",
+          "Diplomatically Worded", "More Concise", "More Detailed",
+          "Simpler Language", "Sharpen the Thesis", "Draft a Counterargument",
+          "Diacritics Only"}),
     ]
     result: list[str] = []
     seen:   set[str]  = set()
@@ -207,17 +216,21 @@ def _modes_with_headers(flat_modes: list[str]) -> list[str]:
     return result
 
 REPHRASE_MODES = [
+    "What's This About?",
+    "Define This",
+    "Key Takeaways",
+    "Explain It",
+    "Explain It (Simply)",
+    "Explain with Quotes",
+    "Polish My Writing",
     "More Casual",
     "More Formal (Academic)",
     "Diplomatically Worded",
-    "Rephrase Text",
     "More Concise",
     "More Detailed",
     "Simpler Language",
-    "Explain It",
-    "Explain It (Simply)",
     "Sharpen the Thesis",
-    "Devil's Advocate",
+    "Draft a Counterargument",
     "Diacritics Only",
     "Translate BHS → English",
     "Translate English → BHS",
@@ -229,6 +242,23 @@ REPHRASE_MODES = _modes_with_headers(REPHRASE_MODES)
 
 _BUILTIN_MODES = [m for m in REPHRASE_MODES if not _is_header(m)]
 
+# Answer modes produce an answer ABOUT the text (a summary, a definition, an
+# explanation) rather than a rewritten version of it. Their output is shown in
+# a read-only style card and NEVER replaces the source text — the source is
+# usually something the user is reading (a web page, a PDF), not writing.
+ANSWER_MODES = frozenset({
+    "What's This About?",
+    "Define This",
+    "Key Takeaways",
+    "Explain It",
+    "Explain It (Simply)",
+    "Explain with Quotes",
+})
+
+def _is_answer_mode(mode: str) -> bool:
+    """True for modes whose output is shown to the reader, never pasted back."""
+    return (mode or "") in ANSWER_MODES
+
 HOTKEY_OPTIONS = ["f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12"]
 
 N_CTX_OPTIONS = [512, 768, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072]
@@ -237,32 +267,21 @@ _REPHRASE_PROMPTS = {
     "More Casual": (
         "Rewrite the following text in a relaxed, conversational tone. "
         "Keep the same core meaning. "
+        "Preserve every claim, example, qualification, technical term, name, and concrete detail. "
+        "Do NOT add facts, opinions, jokes, or new content, and do NOT drop points to sound breezier. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
-    "Rephrase Text": (
-        "The writer has put their thoughts down quickly as rough notes and wants them turned into "
-        "coherent, finished prose — WITHOUT it sounding AI-generated. "
-        "Do NOT summarise and do NOT add ideas of your own. Transform the notes into a polished, "
-        "logically structured piece while preserving the writer's original meaning. "
-        "Preserve every argument, example, and concept the writer presents. "
-        "Do NOT introduce new information, interpretations, facts, or claims that are not already there. "
-        "You MAY: reorder sentences and paragraphs so related ideas sit together and the logic builds "
-        "naturally; improve the transitions between ideas; turn incomplete thoughts into complete "
-        "sentences where the intended meaning is clear; remove repetition and unnecessary wordiness; "
-        "and fix grammar, punctuation, and spelling. "
-        "Where a sentence is unclear, infer the most likely intended meaning from the surrounding "
-        "context and rewrite it clearly rather than guessing. "
-        "Preserve the writer's tone, register, and style — do NOT inflate the vocabulary or raise the "
-        "formality. "
-        "Keep the same level of detail as the notes; do NOT simplify the content unless clarity "
-        "genuinely requires it. "
-        "Preserve the conceptual distinctions the writer makes; do NOT replace a technical term with a "
-        "simpler word unless the meaning stays exactly the same. "
-        "Avoid AI-isms and filler: no 'Moreover', 'Furthermore', 'Additionally', 'It is important to "
-        "note', 'In conclusion', no neat three-part lists, no corporate polish. "
-        "Keep it as flowing prose — do NOT add headings, bullet points, or numbered lists. "
-        "The result should read as a finished draft the writer could publish, still recognisably in "
-        "their own voice. "
+    "Polish My Writing": (
+        "Polish the following writing while keeping the writer's meaning, voice, tone, and level of "
+        "formality recognisably their own. Make only changes that improve clarity, flow, grammar, "
+        "punctuation, or concision; leave wording that already works alone. "
+        "Preserve every argument, example, qualification, technical term, and concrete detail. "
+        "Do NOT add facts, claims, interpretations, examples, or conclusions. Do NOT summarise. "
+        "You may complete an obvious fragment, remove repetition, or reorder nearby sentences when the "
+        "intended relationship is clear, but do not guess at ambiguous meaning. "
+        "Do not inflate the vocabulary, make the text more formal, add headings or lists, or impose a "
+        "generic AI style. Avoid filler such as 'Moreover', 'Furthermore', 'It is important to note', "
+        "and 'In conclusion'. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
     "More Concise": (
@@ -271,19 +290,54 @@ _REPHRASE_PROMPTS = {
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
     "More Detailed": (
-        "Expand the following text by adding relevant detail and context "
-        "to make it clearer and more informative. "
+        "Make the following text more detailed using ONLY information, implications, examples, and "
+        "relationships already present in the text. Clarify compressed reasoning and make implicit "
+        "connections explicit where they are unambiguous. "
+        "Do NOT invent facts, evidence, quotations, sources, examples, motives, or claims. "
+        "If the text does not contain enough information to expand a point safely, leave that point concise. "
+        "Preserve the writer's meaning, tone, and level of certainty. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
     "Simpler Language": (
         "Rewrite the following text using simpler, everyday language "
         "that anyone can understand. Keep the same meaning. "
+        "Simplify the wording, not the content: preserve every claim, example, "
+        "and qualification, even if that keeps a sentence longer. "
+        "Do NOT add facts, examples, or explanations that are not in the text. "
+        "If a technical term or name has no everyday equivalent, keep it as written. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
+    ),
+    "What's This About?": (
+        "The reader has selected a passage they are reading and pressed a key to find out what it is about. "
+        "In one to three short sentences, tell them what the passage is about and what its main point, "
+        "claim, or purpose is. "
+        "Be concrete and specific — name the actual subject and the actual point, not vague categories. "
+        "Do not rewrite or paraphrase the passage sentence by sentence; describe it from above. "
+        "Do not evaluate it or add opinions of your own. "
+        "Return ONLY the answer. No preamble, no labels, no extra lines."
+    ),
+    "Define This": (
+        "The reader has selected a word, phrase, or short expression they did not understand while reading. "
+        "Explain what it means in plain language, in one to three short sentences. "
+        "If it is a technical term, explain it the way you would to an intelligent newcomer and mention "
+        "what field it belongs to. "
+        "If it has several plausible meanings, give the most likely one first, then briefly note the others. "
+        "If it is the name of a person, place, organisation, or work, say briefly who or what that is. "
+        "Return ONLY the explanation. No preamble, no labels, no extra lines."
+    ),
+    "Key Takeaways": (
+        "The reader has selected a longer passage and wants its key points without re-reading it. "
+        "List the main points as short bullet lines, each starting with '• '. "
+        "Use at most five bullets; fewer is better. Each bullet is one plain sentence capturing one "
+        "distinct point. "
+        "Preserve the author's actual claims — do not add interpretations or advice of your own. "
+        "Return ONLY the bullet list. No heading, no preamble, no extra lines."
     ),
     "Explain It": (
         "The reader has selected this passage because they hit a wall — the language, concepts, or structure made them want to stop reading. "
         "Your job is to re-express it so clearly and engagingly that they feel the idea land, understand why it matters, and want to keep going. "
         "Preserve every argument, claim, and nuance — do not simplify the thinking, only the delivery. "
+        "If the author describes an impression, an appearance, or a view they question rather than endorse, keep that framing — never flatten it into a fact. "
         "Replace jargon and abstract nouns with plain language; anchor unfamiliar concepts in concrete, real-world terms. "
         "Briefly illuminate what the author is actually driving at — the underlying point or stakes — so the reader feels oriented, not just informed. "
         "Treat the reader as intelligent: curious, capable, just momentarily lost. Never condescend. "
@@ -292,16 +346,31 @@ _REPHRASE_PROMPTS = {
     ),
     "Explain It (Simply)": (
         "The reader needs this passage explained in plain, everyday language — no jargon, no technical terms, no assumed background knowledge. "
-        "Translate every idea into the kind of words you would use talking to a curious person who has never encountered this subject before. "
-        "For every abstract concept, find a concrete, familiar analogy from everyday life — objects, situations, relationships people already know. "
-        "Keep every idea from the original — do not skip or water down the meaning, only the vocabulary and complexity. "
-        "Use short sentences. Prefer simple words over sophisticated ones at every turn. "
-        "Never talk down to the reader — the goal is clarity and warmth, not simplicity for its own sake. "
-        "Return ONLY the rewritten text. No explanation. No extra lines."
+        "Explain what the author is saying the way you would tell a curious friend who has never met this subject before. "
+        "Keep it SHORT: clearly shorter than the original passage. Cover each main idea in one or two plain sentences — do not pad, repeat, or wander. "
+        "Use at most ONE everyday analogy, and only if it genuinely makes the hardest idea click. "
+        "Stay strictly faithful to the author's position: if the author describes an impression, an appearance, or a view they question rather than endorse, say so explicitly ('it can seem that…') — never state it as fact. "
+        "Do not add examples, names, or claims that are not in the passage. "
+        "Use short sentences. Prefer simple words. Never talk down to the reader. "
+        "Return ONLY the explanation. No preamble, no extra lines."
+    ),
+    "Explain with Quotes": (
+        "The reader wants a dependable explanation grounded only in the selected passage. "
+        "First write 'Meaning:' followed by one or two short sentences explaining the passage's central idea. "
+        "Then write 'Quotes:' followed by at most two bullet lines. "
+        "Each bullet must begin with a short EXACT quote from the passage in quotation marks "
+        "(at most 12 words), then a dash and a brief explanation of what that quote supports. "
+        "Every claim in Meaning must be supported by at least one quoted phrase in Quotes. "
+        "Do not add facts, motives, context, or interpretations not supported by the passage. "
+        "If the passage does not establish something, say so rather than guessing. "
+        "Keep the answer compact, use the same language as the passage, and return ONLY this card."
     ),
     "More Formal (Academic)": (
         "Rewrite the following text in a formal academic style. "
         "Use precise vocabulary and avoid contractions. Keep the same meaning. "
+        "Preserve every argument, example, qualification, technical term, and concrete detail. "
+        "Do NOT add claims, citations, references, evidence, or hedging that is not in the original. "
+        "Do NOT pad the text with filler such as 'Moreover', 'Furthermore', or 'It is important to note'. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
     "Diacritics Only": (
@@ -368,12 +437,13 @@ _REPHRASE_PROMPTS = {
         "Preserve the author's meaning, intent, and all specific details. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
-    "Devil's Advocate": (
-        "Rewrite the following text to argue the opposite or most challenging counterposition. "
-        "Steelman the opposing view: make the strongest, most reasonable case against the original argument. "
-        "Do not strawman or mock the original — engage with it seriously. "
-        "Keep the same register and approximate length as the original. "
-        "Do not add a preamble like 'On the other hand' or 'However'. Just make the counter-argument directly. "
+    "Draft a Counterargument": (
+        "Draft the strongest reasonable counterargument to the position in the following text. "
+        "Address the original argument's actual claims, assumptions, and qualifications; do not strawman or mock it. "
+        "Use only issues that can be identified from the text and general reasoning. Do NOT invent evidence, "
+        "statistics, quotations, sources, events, or attributed views. "
+        "Keep the same register and approximate length as the original, and state the counterargument directly "
+        "without a preamble such as 'On the other hand'. "
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
     "Sharpen the Thesis": (
