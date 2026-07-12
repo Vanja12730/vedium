@@ -46,9 +46,11 @@ def test_settings_split_globals_are_wired_to_modules() -> None:
 
 
 def test_settings_uses_lightweight_ttk_theme() -> None:
-    source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
-    assert "import sv_ttk" not in source
-    assert 'style.theme_use("clam")' in source
+    settings_source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    thread_source = (PACKAGE / "ui_thread.py").read_text(encoding="utf-8")
+    assert "import sv_ttk" not in settings_source
+    assert "import sv_ttk" not in thread_source
+    assert 'style.theme_use("clam")' in thread_source
 
 
 def test_settings_spell_mode_labels_are_valid_unicode() -> None:

@@ -6,8 +6,8 @@ from pynput.keyboard import Key
 
 from . import diagnostics
 from .constants import _CMD_KEY
-from .ui_settings import _ui_call
-from . import ui_settings
+from .ui_thread import _ui_call
+from . import ui_thread
 
 _kbctrl = KbController()
 
@@ -16,7 +16,7 @@ def _clipboard_get_text() -> str:
     """Read text from the system clipboard. Returns empty string on failure/non-text."""
     def _get():
         try:
-            return ui_settings._UI_ROOT.clipboard_get()
+            return ui_thread._UI_ROOT.clipboard_get()
         except tk.TclError:
             return ""
         except Exception:
@@ -30,9 +30,9 @@ def _clipboard_set_text(text: str):
     def _set():
         for attempt in range(6):
             try:
-                ui_settings._UI_ROOT.clipboard_clear()
-                ui_settings._UI_ROOT.clipboard_append(text)
-                ui_settings._UI_ROOT.update_idletasks()
+                ui_thread._UI_ROOT.clipboard_clear()
+                ui_thread._UI_ROOT.clipboard_append(text)
+                ui_thread._UI_ROOT.update_idletasks()
                 return
             except tk.TclError:
                 if attempt < 5:

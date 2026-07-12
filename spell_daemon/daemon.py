@@ -53,9 +53,8 @@ from spell_daemon.ui_toasts import (
     _open_recent_rephrases,
     _info_toast,
 )
+from spell_daemon.ui_thread import _ensure_ui_thread, _ui_call
 from spell_daemon.ui_settings import (
-    _ensure_ui_thread,
-    _ui_call,
     _open_settings,
     _open_chat_window,
 )

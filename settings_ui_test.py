@@ -26,6 +26,7 @@ import tkinter as tk
 from spell_daemon import constants as c
 from spell_daemon import config as sd_config
 from spell_daemon import ui_settings
+from spell_daemon import ui_thread
 
 failures = []
 
@@ -68,10 +69,10 @@ cfg = sd_config.load_cfg()
 # ── Fake the UI thread: everything runs inline on this thread ────────────────
 root = tk.Tk()
 root.withdraw()
-ui_settings._UI_ROOT = root
-ui_settings._UI_THREAD_ID = threading.get_ident()
-ui_settings._UI_STARTED = True
-ui_settings._UI_READY.set()
+ui_thread._UI_ROOT = root
+ui_thread._UI_THREAD_ID = threading.get_ident()
+ui_thread._UI_STARTED = True
+ui_thread._UI_READY.set()
 
 saved_cfgs = []
 

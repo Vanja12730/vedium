@@ -1,6 +1,5 @@
 import sys
 import os
-import queue
 import threading
 import tkinter as tk
 import tkinter.ttk as ttk
@@ -9,6 +8,8 @@ from tkinter import filedialog, messagebox
 from . import constants as c
 from . import llm
 from . import diagnostics
+from . import ui_thread
+from .ui_thread import _ui_call, _update_sv_ttk_theme
 from .llm import fetch_cloud_models, CLOUD_PROVIDERS, connect_server, detect_local_server, connect_cloud, connect_cli, free_chat_stream, _stream_cancel, _streaming_answer, _strip_reasoning
 from .cli_models import detect_clis, EFFORT_LEVELS
 from .constants import BG, DEFAULT_CFG, GPU_OPTIONS, N_CTX_OPTIONS, WORKING_LANGUAGE_OPTIONS, REPHRASE_MODES, _BUILTIN_MODES, _FACTORY_PROMPTS, _is_answer_mode, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _OS_RESERVED_HOTKEYS, _OS_RESERVED_HOTKEY_REASONS
@@ -23,101 +24,6 @@ from .config import (
 from .constants import FORMATS, _detect_format_from_path
 
 _settings_win = None   # module-level singleton reference
-_UI_ROOT = None       # hidden root owned by the UI thread
-_UI_THREAD_ID = None
-_UI_QUEUE = queue.Queue(maxsize=64)
-_UI_READY = threading.Event()
-_UI_STARTED = False
-_UI_START_LOCK = threading.Lock()
-
-def _update_sv_ttk_theme():
-    """Use Tk's lightweight recolorable theme.
-
-    The third-party sv_ttk theme makes live resizing of this widget-heavy
-    Settings window several times slower on Windows.  ``clam`` still honours
-    the custom ttk colours below without the expensive resize path.
-    """
-    try:
-        style = ttk.Style()
-        if "clam" in style.theme_names() and style.theme_use() != "clam":
-            style.theme_use("clam")
-    except Exception:
-        pass
-
-def _ui_thread_main():
-    """Own the single Tk interpreter used by settings, popups, and clipboard."""
-    global _UI_ROOT, _UI_THREAD_ID
-    _UI_THREAD_ID = threading.get_ident()
-    root = tk.Tk()
-    root.withdraw()
-    _UI_ROOT = root
-    _UI_READY.set()
-    _update_sv_ttk_theme()
-
-    def pump_queue():
-        while True:
-            try:
-                fn, args, kwargs, done, box = _UI_QUEUE.get_nowait()
-            except queue.Empty:
-                break
-            try:
-                box["result"] = fn(*args, **kwargs)
-            except Exception as e:
-                box["error"] = e
-                try:
-                    diagnostics.record("ui", "error", "UI action failed.", f"{fn.__name__}: {e}")
-                except Exception:
-                    pass
-            finally:
-                if done is not None:
-                    done.set()
-        root.after(30, pump_queue)
-
-    root.after(30, pump_queue)
-    root.mainloop()
-
-
-def _ensure_ui_thread():
-    """Start the Tk UI thread once and wait until its hidden root exists."""
-    global _UI_STARTED
-    with _UI_START_LOCK:
-        if not _UI_STARTED:
-            threading.Thread(target=_ui_thread_main, daemon=True).start()
-            _UI_STARTED = True
-    _UI_READY.wait(timeout=5)
-
-
-def _ui_call(fn, *args, wait: bool = False, **kwargs):
-    """
-    Run a callable on the single Tk UI thread.
-
-    This prevents Tk widgets, Tk variables, popups, settings windows, and
-    clipboard calls from being created/destroyed by different worker threads.
-    """
-    _ensure_ui_thread()
-    if threading.get_ident() == _UI_THREAD_ID:
-        return fn(*args, **kwargs)
-
-    done = threading.Event() if wait else None
-    box = {}
-    try:
-        _UI_QUEUE.put_nowait((fn, args, kwargs, done, box))
-    except queue.Full:
-        # Queue is full (> 64 pending callbacks). Fire-and-forget calls are
-        # dropped rather than blocking the caller (which may be the pynput
-        # listener thread or a streaming LLM thread holding _llm_lock).
-        # Blocking calls fall back to a short-timeout put so they still
-        # eventually execute without deadlocking indefinitely.
-        if wait:
-            _UI_QUEUE.put((fn, args, kwargs, done, box), timeout=10)
-        else:
-            return None  # drop the fire-and-forget call
-    if wait:
-        done.wait()
-        if "error" in box:
-            raise box["error"]
-        return box.get("result")
-    return None
 
 
 def _open_settings(cfg: dict, on_cfg_saved, on_model_loaded):
@@ -2447,7 +2353,7 @@ def _build_appearance_tab(ui):
         c.apply_scheme(name)
         save_cfg(cfg)
         on_close()
-        _UI_ROOT.after(80, lambda: _ui_call(
+        ui_thread._UI_ROOT.after(80, lambda: _ui_call(
             _open_settings_ui, cfg, on_cfg_saved, on_model_loaded,
             wait=False))
 
@@ -2670,7 +2576,7 @@ def _build_bottom_bar(ui):
             FONT_SIZE_OFFSET = new_offset
             c.apply_font_size(new_offset)
             on_close()
-            _UI_ROOT.after(80, lambda: _ui_call(
+            ui_thread._UI_ROOT.after(80, lambda: _ui_call(
                 _open_settings_ui, cfg, on_cfg_saved, on_model_loaded,
                 wait=False))
             if model_changed:
@@ -2708,7 +2614,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     except tk.TclError:
         _settings_win = None
 
-    win = tk.Toplevel(_UI_ROOT)
+    win = tk.Toplevel(ui_thread._UI_ROOT)
     _settings_win = win
     win.title("Vedium — Settings")
     win.configure(bg=BG)
@@ -2993,7 +2899,7 @@ def _open_chat_window_ui(cfg: dict):
 
     fmt = cfg.get("prompt_format", "ChatML  (Qwen / Phi-3 / Yi)")
 
-    win = tk.Toplevel(_UI_ROOT)
+    win = tk.Toplevel(ui_thread._UI_ROOT)
     win.title("Chat with AI")
     win.attributes("-topmost", False)
     win.configure(bg=SURFACE)

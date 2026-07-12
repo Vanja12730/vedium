@@ -57,6 +57,7 @@ import tkinter.ttk as ttk
 
 from spell_daemon import constants as c
 from spell_daemon import ui_settings
+from spell_daemon import ui_thread
 
 
 def _walk(parent):
@@ -114,10 +115,10 @@ def main() -> int:
 
     root = tk.Tk()
     root.withdraw()
-    ui_settings._UI_ROOT = root
-    ui_settings._UI_THREAD_ID = threading.get_ident()
-    ui_settings._UI_STARTED = True
-    ui_settings._UI_READY.set()
+    ui_thread._UI_ROOT = root
+    ui_thread._UI_THREAD_ID = threading.get_ident()
+    ui_thread._UI_STARTED = True
+    ui_thread._UI_READY.set()
     saved = []
     ui_settings._open_settings_ui(cfg, lambda new: saved.append(dict(new)), lambda _path: "Local")
     win = ui_settings._settings_win
