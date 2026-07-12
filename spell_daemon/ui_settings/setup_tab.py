@@ -132,7 +132,7 @@ def _build_setup_tab(ui):
 
     def _setup_status_text() -> tuple[str, str, str]:
         mode = backend_var.get()
-        backend_now = getattr(llm, "_llm_backend", "") or ""
+        backend_now = llm._backend.label or ""
         if backend_now:
             backend_txt = f"Ready: {backend_now}"
             backend_col = SUCCESS

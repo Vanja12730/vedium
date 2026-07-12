@@ -22,7 +22,7 @@ def _fake_backend(captured: list, events: list | None = None):
     (component, severity, message) tuples. Restores everything on exit."""
     import spell_daemon.llm as llm
 
-    orig = (llm._llm, llm._build_prompt, llm._complete_prompt,
+    orig = (llm._backend.client, llm._build_prompt, llm._complete_prompt,
             llm._stream_prompt, llm._get_thinking_budget, llm.diagnostics)
 
     def fake_build(fmt, system, user):
@@ -33,7 +33,7 @@ def _fake_backend(captured: list, events: list | None = None):
         yield {"choices": [{"text": "ok"}]}
 
     events = events if events is not None else []
-    llm._llm = object()  # non-None: "a backend is connected"
+    llm._backend.client = object()  # non-None: "a backend is connected"
     llm._build_prompt = fake_build
     llm._complete_prompt = lambda *a, **k: {"choices": [{"text": "ok"}]}
     llm._stream_prompt = fake_stream
@@ -46,7 +46,7 @@ def _fake_backend(captured: list, events: list | None = None):
     try:
         yield llm
     finally:
-        (llm._llm, llm._build_prompt, llm._complete_prompt,
+        (llm._backend.client, llm._build_prompt, llm._complete_prompt,
          llm._stream_prompt, llm._get_thinking_budget, llm.diagnostics) = orig
 
 
@@ -315,9 +315,9 @@ def _cloud_failover_env(dispatch):
             {"provider": "TestProv", "base_url": base, "model": "stable-model"},
         ],
     }
-    saved = (llm._llm, llm._llm_path, llm._llm_backend, llm.diagnostics,
+    saved = (llm._backend.client, llm._backend.path, llm._backend.label, llm.diagnostics,
              llm._CloudClient._request, llm._reasoning_model_detected)
-    llm._llm = llm._CloudClient(base, "key", "flaky-model")
+    llm._backend.client = llm._CloudClient(base, "key", "flaky-model")
     llm._CloudClient._request = fake_request
     llm.diagnostics = types.SimpleNamespace(
         record=lambda *a, **k: None,
@@ -327,7 +327,7 @@ def _cloud_failover_env(dispatch):
     try:
         yield llm, cfg, calls
     finally:
-        (llm._llm, llm._llm_path, llm._llm_backend, llm.diagnostics,
+        (llm._backend.client, llm._backend.path, llm._backend.label, llm.diagnostics,
          llm._CloudClient._request, llm._reasoning_model_detected) = saved
 
 

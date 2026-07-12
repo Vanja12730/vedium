@@ -98,7 +98,7 @@ def _ui_call(fn, *args, wait: bool = False, **kwargs):
     except queue.Full:
         # Queue is full (> 64 pending callbacks). Fire-and-forget calls are
         # dropped rather than blocking the caller (which may be the pynput
-        # listener thread or a streaming LLM thread holding _llm_lock).
+        # listener thread or a streaming LLM thread holding _backend.lock).
         # Blocking calls fall back to a short-timeout put so they still
         # eventually execute without deadlocking indefinitely.
         if wait:

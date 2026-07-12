@@ -147,7 +147,7 @@ def _build_status_tab(ui):
                 return
             snap = diagnostics.snapshot(cfg)
             state = snap["state"]
-            backend = getattr(llm, "_llm_backend", "") or state.get("backend") or "None"
+            backend = llm._backend.label or state.get("backend") or "None"
             if backend and backend != "None":
                 diagnostics.set_status(backend=backend)
 

@@ -190,7 +190,7 @@ class _Toast:
                 except Exception:
                     pass
             # Signal any in-progress chat stream to stop on its next token so
-            # _llm_lock is released promptly rather than after the full response
+            # _backend.lock is released promptly rather than after the full response
             # finishes generating.  The pipelines call _stream_cancel.clear()
             # before each new stream, so this stale signal never affects them.
             _stream_cancel.set()
@@ -569,7 +569,7 @@ class _EditableToast:
                     _et_auto_close_id[0] = None
                 except Exception:
                     pass
-            # Stop any in-progress chat stream so _llm_lock is released promptly.
+            # Stop any in-progress chat stream so _backend.lock is released promptly.
             _stream_cancel.set()
             edited = txt.get("1.0", "end-1c")
             self._txt = None          # prevent stale append_text() calls after close
@@ -588,7 +588,7 @@ class _EditableToast:
                     _et_auto_close_id[0] = None
                 except Exception:
                     pass
-            # Stop any in-progress chat stream so _llm_lock is released promptly.
+            # Stop any in-progress chat stream so _backend.lock is released promptly.
             _stream_cancel.set()
             self._txt = None          # prevent stale append_text() calls after close
             try:

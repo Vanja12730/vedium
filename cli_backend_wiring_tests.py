@@ -86,25 +86,25 @@ def test_connect_cli_is_detection_only_and_opt_in():
     llm.selectable_models = lambda enabled: [{
         "id": "claude-haiku", "label": "Claude Code - Haiku", "efforts": ["low"]
     }] if enabled else []
-    llm._llm = object()
+    llm._backend.client = object()
     try:
         llm.connect_cli("claude-haiku", False)
     except llm.CLIModelError as exc:
         assert "switched off" in str(exc)
     else:
         raise AssertionError("disabled CLI selection should fail")
-    assert llm._llm is None
+    assert llm._backend.client is None
 
     label = llm.connect_cli("claude-haiku", True, "low")
     assert label == "AI CLI (Claude Code - Haiku)"
-    assert isinstance(llm._llm, llm.CLIClient)
-    assert llm._llm.model == "claude-haiku"
+    assert isinstance(llm._backend.client, llm.CLIClient)
+    assert llm._backend.client.model == "claude-haiku"
 
 
 def test_shared_helpers_require_and_forward_semantic_messages():
     llm, _events = _load_isolated_llm()
     client, calls = _client(llm)
-    llm._llm = client
+    llm._backend.client = client
     semantic = [
         {"role": "system", "content": "System"},
         {"role": "user", "content": "User"},
@@ -138,7 +138,7 @@ def test_shared_helpers_require_and_forward_semantic_messages():
 def test_automatic_cli_spell_check_has_a_separate_default_off_gate():
     llm, events = _load_isolated_llm()
     client, calls = _client(llm, reply="Fixed sentence")
-    llm._llm = client
+    llm._backend.client = client
 
     original = "bad sentence"
     disabled_cfg = {"cli_models_enabled": True, "cli_spell_check_enabled": False}
@@ -160,7 +160,7 @@ def test_automatic_cli_spell_check_has_a_separate_default_off_gate():
 def test_manual_rephrase_yields_once_without_footer():
     llm, _events = _load_isolated_llm()
     client, calls = _client(llm, reply="Polished text")
-    llm._llm = client
+    llm._backend.client = client
     llm._stream_cancel.clear()
 
     chunks = list(llm.rephrase_sentence_stream(
@@ -176,7 +176,7 @@ def test_manual_rephrase_yields_once_without_footer():
 def test_standalone_chat_replays_history_and_adds_safe_footer():
     llm, _events = _load_isolated_llm()
     client, calls = _client(llm, reply="Your name is Bo")
-    llm._llm = client
+    llm._backend.client = client
     llm._stream_cancel.clear()
     history = [
         {"role": "user", "content": "My name is Bo"},
@@ -207,7 +207,7 @@ def test_existing_backend_still_receives_exact_raw_prompt():
             return {"choices": [{"text": "existing"}]}
 
     client = ExistingClient()
-    llm._llm = client
+    llm._backend.client = client
     semantic = [{"role": "user", "content": "must be ignored"}]
     out = llm._complete_prompt(
         "EXACT OLD PROMPT", max_tokens=7, temperature=0.2,

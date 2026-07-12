@@ -46,7 +46,7 @@ def _build_bottom_bar(ui):
     FONT_SIZE_MAP = ui.FONT_SIZE_MAP
 
     # Show the live backend if one is already connected ("None" = not connected).
-    _backend_now = getattr(llm, "_llm_backend", "") or ""
+    _backend_now = llm._backend.label or ""
     status = tk.Label(bottom_bar,
                       text=f"Ready ✓ ({_backend_now})" if _backend_now and _backend_now != "None" else "",
                       font=FONT_B, bg=BG, fg=SUCCESS)

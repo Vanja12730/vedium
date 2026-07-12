@@ -20,11 +20,25 @@ from spell_daemon.cli_models import (
     selectable_models,
 )
 
-# LLM globals, matching the namespace of the original module
-_llm = None
-_llm_path = ""
-_llm_backend = "None"
-_llm_lock = threading.Lock()
+class _ActiveBackend:
+    """The currently connected backend: client, identity, and its guard lock.
+
+    ``client`` is whatever object answers the llama-style call interface
+    (llama_cpp.Llama, _LlamaServerClient, _CloudClient, or CLIClient);
+    ``path`` identifies the model file / server URL / cloud model; ``label``
+    is the human-readable name shown in the UI.  Mutate only while holding
+    ``lock`` -- generation paths hold it for entire calls so two pipelines
+    can never share one model instance.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.client = None
+        self.path = ""
+        self.label = "None"
+
+
+_backend = _ActiveBackend()
 _stream_cancel = threading.Event()
 _reasoning_model_detected = False
 _server_disable_thinking = True
@@ -339,7 +353,7 @@ def _backend_unavailable_message(cfg: dict | None = None, feature: str = "chat")
 
 
 class _CloudClient:
-    """OpenAI-compatible chat client. Drop-in for the _llm interface.
+    """OpenAI-compatible chat client. Drop-in for the _backend.client interface.
 
     Mirrors llama_cpp.Llama / _LlamaServerClient: __call__ returns
     {"choices":[{"text":...}]} (or yields those dicts when stream=True) and
@@ -505,14 +519,13 @@ class _CloudClient:
 
 def connect_cli(model: str, enabled: bool, effort: str = "") -> str:
     """Select an installed CLI backend without spending a model request."""
-    global _llm, _llm_path, _llm_backend
 
     # Selection failure must not leave the previous backend resident: with the
     # config already set to "cli", that would act like an invisible fallback.
-    with _llm_lock:
-        _llm = None
-        _llm_path = ""
-        _llm_backend = "None"
+    with _backend.lock:
+        _backend.client = None
+        _backend.path = ""
+        _backend.label = "None"
     diagnostics.set_status(backend="None", backend_mode="cli")
 
     if not enabled:
@@ -531,22 +544,21 @@ def connect_cli(model: str, enabled: bool, effort: str = "") -> str:
 
     client = CLIClient(model, effort, enabled=True)
     label = selected["label"]
-    with _llm_lock:
-        _llm = client
-        _llm_path = model
-        _llm_backend = f"AI CLI ({label})"
+    with _backend.lock:
+        _backend.client = client
+        _backend.path = model
+        _backend.label = f"AI CLI ({label})"
 
-    diagnostics.set_status(backend=_llm_backend, backend_mode="cli")
+    diagnostics.set_status(backend=_backend.label, backend_mode="cli")
     diagnostics.record("backend", "info", f"Selected command-line model {model}.")
-    return _llm_backend
+    return _backend.label
 
 
 def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192) -> str:
-    """Connect to an OpenAI-compatible cloud API. Smoke-tests, then sets _llm.
+    """Connect to an OpenAI-compatible cloud API. Smoke-tests, then sets _backend.client.
 
     Returns a short backend label on success; raises on failure.
     """
-    global _llm, _llm_path, _llm_backend
 
     base_url = base_url.strip()
     if not base_url.startswith(("http://", "https://")):
@@ -566,15 +578,15 @@ def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192
     if not isinstance(out, dict) or "choices" not in out:
         raise RuntimeError("Unexpected response from cloud API.")
 
-    with _llm_lock:
-        _llm         = client
-        _llm_path    = f"{base_url}::{model}"
-        _llm_backend = f"Cloud ({model})"
+    with _backend.lock:
+        _backend.client         = client
+        _backend.path    = f"{base_url}::{model}"
+        _backend.label = f"Cloud ({model})"
 
-    diagnostics.set_status(backend=_llm_backend, backend_mode="cloud")
+    diagnostics.set_status(backend=_backend.label, backend_mode="cloud")
     diagnostics.record("backend", "info", f"Connected to cloud model {model}.")
     print(f"[Vedium] Connected to cloud API {base_url} (model={model})", file=sys.stderr)
-    return _llm_backend
+    return _backend.label
 
 
 # Models that cannot do chat completions (embeddings, audio, image, etc.).
@@ -732,11 +744,10 @@ def _cloud_favorite_fallbacks(cfg: dict | None, current: "_CloudClient") -> list
 
 def _activate_cloud_fallback(client: "_CloudClient", favorite: dict, cfg: dict | None) -> None:
     """Make a successful favorite the live cloud backend for later requests."""
-    global _llm, _llm_path, _llm_backend
 
-    _llm = client
-    _llm_path = f"{client.base_url}::{client.model}"
-    _llm_backend = f"Cloud ({client.model})"
+    _backend.client = client
+    _backend.path = f"{client.base_url}::{client.model}"
+    _backend.label = f"Cloud ({client.model})"
     if cfg is not None:
         cfg["backend_mode"] = "cloud"
         provider = favorite.get("provider", cfg.get("cloud_provider", ""))
@@ -748,7 +759,7 @@ def _activate_cloud_fallback(client: "_CloudClient", favorite: dict, cfg: dict |
             keys = dict(cfg.get("cloud_api_keys", {}))
             keys[provider] = client.api_key
             cfg["cloud_api_keys"] = keys
-    diagnostics.set_status(backend=_llm_backend, backend_mode="cloud")
+    diagnostics.set_status(backend=_backend.label, backend_mode="cloud")
     diagnostics.record("backend", "info", f"Switched to fallback cloud model {client.model}.")
 
 
@@ -784,7 +795,7 @@ def _cloud_complete_with_fallback(messages: list, *, max_tokens: int,
                                   temperature: float, stop=None,
                                   cfg: dict | None = None, on_fallback=None) -> dict:
     """Complete once, retrying pre-response quota and provider-server failures."""
-    current = _llm
+    current = _backend.client
     if not isinstance(current, _CloudClient):
         raise RuntimeError("Cloud fallback requested without a cloud backend.")
 
@@ -824,7 +835,7 @@ def _cloud_stream_with_fallback(messages: list, *, max_tokens: int,
     Once a model has yielded text, retrying with another model would duplicate or
     splice together two replies, so that partial-response failure is surfaced.
     """
-    current = _llm
+    current = _backend.client
     if not isinstance(current, _CloudClient):
         raise RuntimeError("Cloud fallback requested without a cloud backend.")
 
@@ -875,7 +886,7 @@ def _complete_prompt(prompt: str, *, max_tokens: int, temperature: float,
                      cfg: dict | None = None, on_fallback=None,
                      messages: list[dict] | None = None) -> dict:
     """Run one completion, with favorite failover when the live backend is cloud."""
-    client = _llm
+    client = _backend.client
     if isinstance(client, CLIClient):
         if messages is None:
             raise CLIModelError("Command-line model request is missing semantic messages.")
@@ -900,7 +911,7 @@ def _stream_prompt(prompt: str, *, max_tokens: int, temperature: float,
                    cfg: dict | None = None, on_fallback=None,
                    messages: list[dict] | None = None):
     """Stream one prompt, with quota failover for cloud backends."""
-    client = _llm
+    client = _backend.client
     if isinstance(client, CLIClient):
         if messages is None:
             raise CLIModelError("Command-line model request is missing semantic messages.")
@@ -984,12 +995,11 @@ def fetch_cloud_models(base_url: str, api_key: str, timeout: float = 15.0) -> li
 def connect_server(url: str, cfg_n_ctx: int = 4096) -> str:
     """
     Connect to a running llama-server at url.
-    Creates a _LlamaServerClient, smoke-tests it, assigns it to _llm.
+    Creates a _LlamaServerClient, smoke-tests it, assigns it to _backend.client.
     cfg_n_ctx is the context-window size from the user's settings; used as
     the fallback when the server's /props endpoint does not expose n_ctx.
     Returns a short backend label string on success; raises on failure.
     """
-    global _llm, _llm_path, _llm_backend
     import urllib.request, json as _json
 
     url = url.strip()
@@ -999,7 +1009,7 @@ def connect_server(url: str, cfg_n_ctx: int = 4096) -> str:
     client = _LlamaServerClient(url, cfg_n_ctx=cfg_n_ctx)
 
     # Smoke-test: send a minimal completion to confirm the server is alive
-    # and accepting requests before we commit the client to _llm.
+    # and accepting requests before we commit the client to _backend.client.
     payload = _json.dumps({"prompt": "Hi", "n_predict": 1, "stream": False}).encode()
     req = urllib.request.Request(
         f"{client.base_url}/completion",
@@ -1009,16 +1019,16 @@ def connect_server(url: str, cfg_n_ctx: int = 4096) -> str:
     )
     urllib.request.urlopen(req, timeout=8)   # raises urllib.error.URLError on failure
 
-    with _llm_lock:
-        _llm         = client
-        _llm_path    = url
-        _llm_backend = f"Server ({url})"
+    with _backend.lock:
+        _backend.client         = client
+        _backend.path    = url
+        _backend.label = f"Server ({url})"
 
-    diagnostics.set_status(backend=_llm_backend, backend_mode="server")
+    diagnostics.set_status(backend=_backend.label, backend_mode="server")
     diagnostics.record("backend", "info", f"Connected to local server {url}.")
     print(f"[Vedium] Connected to llama-server at {url} (n_ctx={client._n_ctx})",
           file=sys.stderr)
-    return _llm_backend
+    return _backend.label
 
 
 # Common ports a local llama-server is started on. Scanned at startup (in this
@@ -1200,7 +1210,6 @@ def load_model(path: str):
     Load (or reload) a GGUF model from disk. Blocks until done.
     Returns a short backend label: "GPU", "CPU", or "CPU (GPU fallback)".
     """
-    global _llm, _llm_path, _llm_backend
 
     # Fail fast with a clear message when llama-cpp-python is missing.
     # Without this check the GPU attempt fails with ModuleNotFoundError, the
@@ -1227,34 +1236,34 @@ def load_model(path: str):
     if not wants_gpu:
         print("[Vedium] GPU acceleration disabled — loading on CPU.", file=sys.stderr)
 
-    with _llm_lock:
+    with _backend.lock:
         if wants_gpu:
             try:
-                _llm = _make_llama(path, use_gpu=True, n_ctx=n_ctx)
+                _backend.client = _make_llama(path, use_gpu=True, n_ctx=n_ctx)
                 # Warmup: run a minimal inference to catch missing DLLs or driver
                 # issues before the first real sentence arrives.  Same pattern as
                 # voice_anywhere.py — the first real inference should not pay the
                 # JIT cost or discover a broken CUDA install mid-sentence.
                 try:
-                    _llm("Hi", max_tokens=1, echo=False)
+                    _backend.client("Hi", max_tokens=1, echo=False)
                     gpu_backend = _detect_gpu_backend()
-                    _llm_backend = f"GPU ({gpu_backend})"
-                    _llm_path = path
+                    _backend.label = f"GPU ({gpu_backend})"
+                    _backend.path = path
                     print(f"[Vedium] GPU warmup passed — running on {gpu_backend}.", file=sys.stderr)
-                    diagnostics.set_status(backend=_llm_backend, backend_mode="local")
-                    diagnostics.record("backend", "info", f"Loaded local model on {_llm_backend}.")
-                    return _llm_backend
+                    diagnostics.set_status(backend=_backend.label, backend_mode="local")
+                    diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
+                    return _backend.label
                 except Exception as warmup_err:
                     print(
                         f"[Vedium] GPU warmup failed ({warmup_err}); reloading on CPU.",
                         file=sys.stderr,
                     )
-                    _llm = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
-                    _llm_backend = "CPU (GPU warmup failed)"
-                    _llm_path = path
-                    diagnostics.set_status(backend=_llm_backend, backend_mode="local")
-                    diagnostics.record("backend", "info", f"Loaded local model on {_llm_backend}.")
-                    return _llm_backend
+                    _backend.client = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
+                    _backend.label = "CPU (GPU warmup failed)"
+                    _backend.path = path
+                    diagnostics.set_status(backend=_backend.label, backend_mode="local")
+                    diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
+                    return _backend.label
             except Exception as gpu_error:
                 diagnostics.record("backend", "warning", "GPU load failed; falling back to CPU.", str(gpu_error))
                 print(
@@ -1262,12 +1271,12 @@ def load_model(path: str):
                     file=sys.stderr,
                 )
 
-        _llm = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
-        _llm_path = path
-        _llm_backend = "CPU (GPU fallback)" if wants_gpu else "CPU"
-        diagnostics.set_status(backend=_llm_backend, backend_mode="local")
-        diagnostics.record("backend", "info", f"Loaded local model on {_llm_backend}.")
-        return _llm_backend
+        _backend.client = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
+        _backend.path = path
+        _backend.label = "CPU (GPU fallback)" if wants_gpu else "CPU"
+        diagnostics.set_status(backend=_backend.label, backend_mode="local")
+        diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
+        return _backend.label
 
 
 def _language_instruction(working_language: str) -> str:
@@ -1739,8 +1748,8 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
     correction is secondary — this prevents small models from latching onto the
     "do not rewrite" clause and ignoring the language directive.
     """
-    with _llm_lock:
-        if _llm is None:
+    with _backend.lock:
+        if _backend.client is None:
             diagnostics.set_status(backend="None")
             diagnostics.record_throttled(
                 "backend", "warning",
@@ -1748,7 +1757,7 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
                 cooldown_sec=20.0,
             )
             return text
-        if isinstance(_llm, CLIClient) and not bool(
+        if isinstance(_backend.client, CLIClient) and not bool(
             (cfg or {}).get("cli_spell_check_enabled", False)
         ):
             diagnostics.record_throttled(
@@ -1924,8 +1933,8 @@ def _calc_rephrase_max_tokens(text: str, sys_msg: str = "") -> int:
     significantly longer than the 175-token default, which previously caused
     the context window to be overrun and output to be cut off mid-stream.
 
-    The function is called inside _llm_lock in both rephrase_sentence and
-    rephrase_sentence_stream, so _llm is guaranteed to be non-None here.
+    The function is called inside _backend.lock in both rephrase_sentence and
+    rephrase_sentence_stream, so _backend.client is guaranteed to be non-None here.
     """
     input_words = _word_count(text)
 
@@ -1944,7 +1953,7 @@ def _calc_rephrase_max_tokens(text: str, sys_msg: str = "") -> int:
     # unreadable and the clamp is skipped.
     thinking = _get_thinking_budget()
     try:
-        n_ctx = _llm.context_params.n_ctx
+        n_ctx = _backend.client.context_params.n_ctx
         # Estimate system-prompt token cost from the actual sys_msg when available.
         # Custom modes can have prompts far longer than 175 tokens; using the real
         # length prevents max_tok from being set higher than the context window can
@@ -1979,19 +1988,19 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
     have been collected. Falls back to yielding `text` unchanged if no model
     is loaded.
 
-    _llm_lock is held for the entire call including the streaming loop.
+    _backend.lock is held for the entire call including the streaming loop.
     llama.cpp's inference state is not thread-safe: releasing the lock before
     iteration is complete would allow spell_check_sentence (or a concurrent
-    chat stream) to call _llm(...) at the same time, corrupting model state.
+    chat stream) to call _backend.client(...) at the same time, corrupting model state.
 
     Early exit: each iteration checks _stream_cancel. When close_with() inside
     _Toast._show sets that event the generator returns immediately, releasing
-    _llm_lock without waiting for the model to finish generating.  The pipelines
+    _backend.lock without waiting for the model to finish generating.  The pipelines
     call _stream_cancel.clear() before starting a new stream so a stale cancel
     from a previous toast never suppresses a fresh generation.
     """
-    with _llm_lock:
-        if _llm is None:
+    with _backend.lock:
+        if _backend.client is None:
             diagnostics.set_status(backend="None")
             diagnostics.record_throttled(
                 "backend", "warning",
@@ -2079,14 +2088,14 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
 
     If no model is loaded, yields `text` unchanged.
 
-    _llm_lock is held for the entire call.  See rephrase_sentence_stream for
+    _backend.lock is held for the entire call.  See rephrase_sentence_stream for
     the rationale.  The _stream_cancel event lets the _Toast close_with()
     callback stop an in-progress stream the moment the user dismisses the
     toast, so the lock is released promptly rather than after the model
     finishes generating its full response.
     """
-    with _llm_lock:
-        if _llm is None:
+    with _backend.lock:
+        if _backend.client is None:
             diagnostics.set_status(backend="None")
             diagnostics.record_throttled(
                 "backend", "warning",
@@ -2116,7 +2125,7 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
         input_words = _word_count(text)
         max_tok = max(256, input_words * 3)
         try:
-            n_ctx = _llm.context_params.n_ctx
+            n_ctx = _backend.client.context_params.n_ctx
             prompt_overhead = 200 + int(input_words * 1.3)
             max_tok = max(64, min(max_tok, n_ctx - prompt_overhead))
         except Exception:
@@ -2154,13 +2163,12 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
     don't overflow the context window.  Falls back to an empty stream if no model
     is loaded.
 
-    _llm_lock is held for the entire streaming call — same rationale as
+    _backend.lock is held for the entire streaming call — same rationale as
     rephrase_sentence_stream.  The _stream_cancel event lets the chat window
     stop an in-progress stream the moment the user closes it.
     """
-    global _llm, _llm_path, _llm_backend
-    with _llm_lock:
-        if _llm is None:
+    with _backend.lock:
+        if _backend.client is None:
             diagnostics.set_status(backend="None")
             diagnostics.record_throttled(
                 "backend", "warning",
@@ -2179,7 +2187,7 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
         total_input_words = sum(_word_count(t["content"]) for t in history)
         max_tok = max(256, min(1024, total_input_words * 2))
         try:
-            n_ctx = _llm.context_params.n_ctx
+            n_ctx = _backend.client.context_params.n_ctx
             prompt_overhead = 200 + int(total_input_words * 1.5)
             if prompt_overhead >= n_ctx:
                 # The accumulated conversation is already too large to fit in
@@ -2197,16 +2205,16 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
         except Exception:
             max_tok = min(max_tok, 2048)
 
-        if isinstance(_llm, CLIClient):
+        if isinstance(_backend.client, CLIClient):
             messages = _chat_history_to_messages(sys_msg, history)
-            text, provenance = _llm.complete(
-                messages, enabled=_cli_enabled_for_request(_llm, cfg)
+            text, provenance = _backend.client.complete(
+                messages, enabled=_cli_enabled_for_request(_backend.client, cfg)
             )
             _record_cli_provenance(provenance)
             if not _stream_cancel.is_set():
                 yield f"{text}\n\n{provenance_footer(provenance)}"
             return
-        if isinstance(_llm, _CloudClient):
+        if isinstance(_backend.client, _CloudClient):
             messages = _chat_history_to_messages(sys_msg, history)
             # Chat has no toast to host the failover notice, so queue the
             # switch events here and yield them inline into the transcript
@@ -2228,7 +2236,7 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
             return
         else:
             prompt, stop = _build_chat_prompt(fmt, sys_msg, history)
-            stream = _llm(
+            stream = _backend.client(
                 prompt,
                 max_tokens=max_tok,
                 temperature=0.7,

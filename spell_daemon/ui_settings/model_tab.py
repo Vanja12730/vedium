@@ -181,7 +181,7 @@ def _build_model_tab(ui):
                 _ui_call(lambda u=found: server_url_var.set(u), wait=False)
                 try:
                     connect_server(found, cfg_n_ctx=ctx_var.get())
-                    n = llm._llm._n_ctx if hasattr(llm._llm, "_n_ctx") else "?"
+                    n = llm._backend.client._n_ctx if hasattr(llm._backend.client, "_n_ctx") else "?"
                     _ui_call(lambda u=found, n=n: (
                         server_status_var.set(f"✓ Detected & connected: {u}  (n_ctx={n})"),
                         server_status_lbl.config(fg=SUCCESS),
@@ -200,7 +200,7 @@ def _build_model_tab(ui):
         def _do_test():
             try:
                 connect_server(url, cfg_n_ctx=ctx_var.get())
-                n = llm._llm._n_ctx if hasattr(llm._llm, "_n_ctx") else "?"
+                n = llm._backend.client._n_ctx if hasattr(llm._backend.client, "_n_ctx") else "?"
                 _ui_call(lambda n=n: (
                     server_status_var.set(f"✓ Connected  (n_ctx={n})"),
                     server_status_lbl.config(fg=SUCCESS),
