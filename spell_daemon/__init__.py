@@ -17,9 +17,11 @@ from spell_daemon import prompt_builder
 from spell_daemon import config
 from spell_daemon import buffer
 from spell_daemon import ui_thread
+from spell_daemon import ui_widgets
 from spell_daemon import replacement
 from spell_daemon import llm
 from spell_daemon import ui_settings
+from spell_daemon import ui_chat
 from spell_daemon import ui_toasts
 from spell_daemon import ui_tray
 from spell_daemon import daemon

@@ -10,6 +10,15 @@ def _parse(path: pathlib.Path) -> ast.Module:
     return ast.parse(path.read_text(encoding="utf-8"))
 
 
+def _settings_ui_files() -> list[pathlib.Path]:
+    """Every source file of the Settings window (the ui_settings package)."""
+    return sorted((PACKAGE / "ui_settings").glob("*.py"))
+
+
+def _settings_ui_source() -> str:
+    return "\n".join(p.read_text(encoding="utf-8") for p in _settings_ui_files())
+
+
 def test_no_launcher_uses_old_monolith() -> None:
     run_vbs = (ROOT / "run.vbs").read_text(encoding="utf-8")
     installer = (ROOT / "Vedium.iss").read_text(encoding="utf-8")
@@ -19,7 +28,7 @@ def test_no_launcher_uses_old_monolith() -> None:
 
 
 def test_standalone_chat_imports_and_symbols_exist() -> None:
-    tree = _parse(PACKAGE / "ui_settings.py")
+    tree = _parse(PACKAGE / "ui_chat.py")
 
     imported_from_llm = set()
     for node in tree.body:
@@ -33,20 +42,20 @@ def test_standalone_chat_imports_and_symbols_exist() -> None:
 
 
 def test_settings_split_globals_are_wired_to_modules() -> None:
-    tree = _parse(PACKAGE / "ui_settings.py")
     imported_from_constants = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "constants" and node.level == 1:
-            imported_from_constants.update(alias.name for alias in node.names)
+    for path in _settings_ui_files():
+        for node in _parse(path).body:
+            if isinstance(node, ast.ImportFrom) and node.module == "constants" and node.level in (1, 2):
+                imported_from_constants.update(alias.name for alias in node.names)
 
-    source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    source = _settings_ui_source()
     assert "_FACTORY_PROMPTS" in imported_from_constants
     assert "_refresh_setup_status" not in source
     assert "llm._server_disable_thinking = bool(nothink_var.get())" in source
 
 
 def test_settings_uses_lightweight_ttk_theme() -> None:
-    settings_source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    settings_source = _settings_ui_source()
     thread_source = (PACKAGE / "ui_thread.py").read_text(encoding="utf-8")
     assert "import sv_ttk" not in settings_source
     assert "import sv_ttk" not in thread_source
@@ -54,7 +63,7 @@ def test_settings_uses_lightweight_ttk_theme() -> None:
 
 
 def test_settings_spell_mode_labels_are_valid_unicode() -> None:
-    source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    source = _settings_ui_source()
     assert '"Auto  –  replace silently"' in source
     assert '"Toast  –  always ask first"' in source
     assert '"Off  –  disable (keep rephrase)"' in source
@@ -66,7 +75,7 @@ def test_backend_unavailable_message_exists() -> None:
 
 
 def test_cloud_test_connect_updates_live_config() -> None:
-    source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    source = _settings_ui_source()
     assert 'cfg["cloud_api_key"] = key' in source
     assert "API keys are not saved to disk" in source
 
@@ -102,7 +111,7 @@ def test_cloud_quota_fallback_is_shared_across_generation_paths() -> None:
 def test_cloud_api_key_secure_storage() -> None:
     config_source = (PACKAGE / "config.py").read_text(encoding="utf-8")
     constants_source = (PACKAGE / "constants.py").read_text(encoding="utf-8")
-    ui_source = (PACKAGE / "ui_settings.py").read_text(encoding="utf-8")
+    ui_source = _settings_ui_source()
 
     assert '"remember_cloud_api_key": True' in constants_source
     assert "def get_stored_cloud_api_key" in config_source

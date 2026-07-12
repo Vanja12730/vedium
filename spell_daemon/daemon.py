@@ -54,10 +54,8 @@ from spell_daemon.ui_toasts import (
     _info_toast,
 )
 from spell_daemon.ui_thread import _ensure_ui_thread, _ui_call
-from spell_daemon.ui_settings import (
-    _open_settings,
-    _open_chat_window,
-)
+from spell_daemon.ui_settings import _open_settings
+from spell_daemon.ui_chat import _open_chat_window
 from spell_daemon.ui_tray import _make_icon
 
 

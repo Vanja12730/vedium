@@ -26,7 +26,9 @@ import tkinter as tk
 from spell_daemon import constants as c
 from spell_daemon import config as sd_config
 from spell_daemon import ui_settings
+from spell_daemon import ui_chat
 from spell_daemon import ui_thread
+from spell_daemon.ui_settings import model_tab, bottom_bar
 
 failures = []
 
@@ -48,15 +50,17 @@ src_cfg_path = c.CONFIG_FILE if os.path.exists(c.CONFIG_FILE) else c.LEGACY_CONF
 shutil.copyfile(src_cfg_path, tmp_cfg_path)
 c.CONFIG_FILE = tmp_cfg_path
 
-ui_settings.store_cloud_api_key = lambda *a, **k: True
-ui_settings.delete_stored_cloud_api_key = lambda *a, **k: True
-ui_settings.get_stored_cloud_api_key = lambda *a, **k: ""
-ui_settings.fetch_cloud_models = lambda *a, **k: []
-ui_settings.connect_cloud = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
-ui_settings.connect_server = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
-ui_settings.detect_local_server = lambda *a, **k: ""
-ui_settings.connect_cli = lambda *a, **k: "Stub CLI backend"
-ui_settings.detect_clis = lambda: {
+model_tab.store_cloud_api_key = lambda *a, **k: True
+model_tab.delete_stored_cloud_api_key = lambda *a, **k: True
+model_tab.get_stored_cloud_api_key = lambda *a, **k: ""
+model_tab.fetch_cloud_models = lambda *a, **k: []
+model_tab.connect_cloud = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
+model_tab.connect_server = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
+model_tab.detect_local_server = lambda *a, **k: ""
+bottom_bar.connect_cloud = model_tab.connect_cloud
+bottom_bar.connect_server = model_tab.connect_server
+bottom_bar.connect_cli = lambda *a, **k: "Stub CLI backend"
+model_tab.detect_clis = lambda: {
     "claude": {"path": r"C:\stub\claude.cmd", "models": [
         {"id": "claude-haiku", "label": "Claude Code - Haiku", "efforts": ["low"]},
     ]},
@@ -161,14 +165,14 @@ with open(tmp_cfg_path, encoding="utf-8") as f:
 check("geometry persisted on close", "settings_window_width" in written)
 
 # ── Chat window builds and closes ─────────────────────────────────────────────
-ui_settings._open_chat_window_ui(cfg)
-chat = ui_settings._chat_win
+ui_chat._open_chat_window_ui(cfg)
+chat = ui_chat._chat_win
 check("chat window built", chat is not None and chat.winfo_exists())
 chat.withdraw()
 chat.update_idletasks()
 chat.destroy()
 root.update()
-check("chat window closed", ui_settings._chat_win is None)
+check("chat window closed", ui_chat._chat_win is None)
 
 root.destroy()
 shutil.rmtree(tmpdir, ignore_errors=True)

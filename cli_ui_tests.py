@@ -58,6 +58,7 @@ import tkinter.ttk as ttk
 from spell_daemon import constants as c
 from spell_daemon import ui_settings
 from spell_daemon import ui_thread
+from spell_daemon.ui_settings import model_tab, bottom_bar
 
 
 def _walk(parent):
@@ -75,14 +76,16 @@ def main() -> int:
     cfg["backend_mode"] = "local"
     Path(c.CONFIG_FILE).write_text(json.dumps(cfg), encoding="utf-8")
 
-    ui_settings.store_cloud_api_key = lambda *a, **k: True
-    ui_settings.delete_stored_cloud_api_key = lambda *a, **k: True
-    ui_settings.get_stored_cloud_api_key = lambda *a, **k: ""
-    ui_settings.fetch_cloud_models = lambda *a, **k: []
-    ui_settings.connect_cloud = lambda *a, **k: "Stub cloud"
-    ui_settings.connect_server = lambda *a, **k: "Stub server"
-    ui_settings.detect_local_server = lambda *a, **k: ""
-    ui_settings.detect_clis = lambda: {
+    model_tab.store_cloud_api_key = lambda *a, **k: True
+    model_tab.delete_stored_cloud_api_key = lambda *a, **k: True
+    model_tab.get_stored_cloud_api_key = lambda *a, **k: ""
+    model_tab.fetch_cloud_models = lambda *a, **k: []
+    model_tab.connect_cloud = lambda *a, **k: "Stub cloud"
+    model_tab.connect_server = lambda *a, **k: "Stub server"
+    model_tab.detect_local_server = lambda *a, **k: ""
+    bottom_bar.connect_cloud = model_tab.connect_cloud
+    bottom_bar.connect_server = model_tab.connect_server
+    model_tab.detect_clis = lambda: {
         "claude": {
             "path": r"C:\stub\claude.cmd",
             "models": [{
@@ -102,7 +105,7 @@ def main() -> int:
         connected.set()
         return "AI CLI (Claude Code - Haiku)"
 
-    ui_settings.connect_cli = _connect_cli
+    bottom_bar.connect_cli = _connect_cli
 
     answers = [False, True, False, True]
     warnings = []
@@ -111,7 +114,7 @@ def main() -> int:
         warnings.append((title, message))
         return answers.pop(0)
 
-    ui_settings.messagebox.askokcancel = _ask
+    model_tab.messagebox.askokcancel = _ask
 
     root = tk.Tk()
     root.withdraw()
@@ -200,7 +203,7 @@ def main() -> int:
     assert main_toggle.variable.get() is False
     assert spell_toggle.variable.get() is False
 
-    source = (ROOT / "spell_daemon" / "ui_settings.py").read_text(encoding="utf-8")
+    source = (ROOT / "spell_daemon" / "ui_chat.py").read_text(encoding="utf-8")
     label_pos = source.index('_append_display("\\nAI\\n", "ai_name")')
     wait_pos = source.index('_append_display("💭 Thinking…", "ai_stream")')
     worker_pos = source.index("def _stream_worker():", label_pos)
