@@ -1,4 +1,4 @@
-# Guide: Add "AI CLI models" (Claude Code / Codex) to any app
+# Guide: Add "AI CLI models" (Claude Code / Codex / Antigravity) to any app
 
 **Audience:** an AI coding assistant (of any capability level) implementing this
 feature in an arbitrary application. This document is self-contained — you do
@@ -14,11 +14,17 @@ is conditioned on those answers.
 
 ## 1. What you are building (mental model)
 
-Many users have the **Claude Code** CLI (`claude`) and/or the **Codex** CLI
-(`codex`) installed and signed in to a subscription. Those CLIs can be run
-**non-interactively**: you spawn the CLI as a subprocess, feed it a prompt,
-and read back one reply. That turns the user's existing subscription into a
-"model backend" for your app — **no API keys, no per-token billing**.
+Many users have the **Claude Code** CLI (`claude`), the **Codex** CLI
+(`codex`), and/or Google's **Antigravity** CLI (`agy`) installed and signed
+in to a subscription. Those CLIs can be run **non-interactively**: you spawn
+the CLI as a subprocess, feed it a prompt, and read back one reply. That
+turns the user's existing subscription into a "model backend" for your app —
+**no API keys, no per-token billing**.
+
+(Historical note: Google's older `gemini` CLI stopped serving consumer
+accounts — free, Google AI Pro, and AI Ultra — on 2026-06-18. Antigravity
+CLI is its successor for those accounts; do not target `gemini` for new
+work.)
 
 The mental model is: *the app opens a terminal in the user's working folder
 and types `claude "<prompt>"` for them, then copies the answer back.*
@@ -43,14 +49,15 @@ Key facts that shape the whole design:
 ## 2. Prerequisites (user-side, not app-side)
 
 The only prerequisite is: *the CLI already works in the user's own terminal.*
-That means the user has run `claude` (and logged in) or `codex login` at least
-once. Your app does not install, configure, or authenticate anything.
+That means the user has run `claude` (and logged in), `codex login`, or `agy`
+(and completed the Google sign-in) at least once. Your app does not install,
+configure, or authenticate anything.
 
 ## 3. Architecture — the five pieces you will write
 
 | Piece | Responsibility |
 |---|---|
-| **Detector** | Find `claude` / `codex` on PATH (with Windows quirks handled). |
+| **Detector** | Find `claude` / `codex` / `agy` on PATH (with Windows quirks handled). |
 | **Invoker** | Build the exact command line, spawn the subprocess, feed stdin, collect output, enforce a timeout. |
 | **Parser** | Turn raw CLI output into `(reply_text, model_that_answered)`. |
 | **Adapter** | Flatten your app's chat-message format into one prompt string; append a provenance footer to replies. |
@@ -82,8 +89,9 @@ is a guess; do not proceed on guesses.
 3. **Does the app have a "user workspace folder"?** In a coding app,
    cwd = the project folder and read-only file tools add real context. In an
    app with no user-owned folder (a document reader, a note app, a chat
-   client), file tools are useless or leaky — pass `--tools ""` (Claude) and
-   keep `--sandbox read-only` (Codex), and set cwd to something neutral like
+   client), file tools are useless or leaky — pass `--tools ""` (Claude),
+   keep `--sandbox read-only` (Codex) and `--mode plan` (Antigravity), and
+   set cwd to something neutral like
    the app's data directory. Never default to the app's own source folder
    with tools enabled: the model would read your app's code as "context".
 4. **Can the app invoke models WITHOUT an explicit user pick?** Search the
@@ -411,9 +419,102 @@ def codex_default_model():
         return ""
 ```
 
-## 7. Step 4 — Multi-turn conversations (both CLIs)
+## 6b. Step 3b — Invoking Antigravity CLI (`agy`) non-interactively
 
-Both CLIs take one prompt per invocation and remember nothing. Replay the
+Antigravity CLI serves Google's Gemini family plus a few third-party models
+through the user's Google account (free tier, or paid Google AI Pro/Ultra).
+Verified against agy 1.1.1 on Windows, 2026-07-11 — re-verify with
+`agy --help` per the version-drift warning above.
+
+### The exact command
+
+```
+agy -p "<full prompt text>" \
+    --mode plan \
+    --print-timeout 240s \
+    --log-file <tempfile-in-cwd> \
+    [--model "<exact display label>"]
+```
+
+- **The prompt is a command-line argument, not stdin.** Pass empty stdin and
+  close it. Windows caps a command line at 32767 characters, so reject
+  prompts over ~30000 characters with an actionable "too long" error before
+  spawning.
+- **The reply is plain text on stdout** (agy 1.1.1 has no JSON output
+  format). Strip it; empty stdout or non-zero exit → error.
+- `--mode plan` is the read-only mode — the safety equivalent of Codex's
+  `--sandbox read-only`. Still use a neutral/empty cwd per Step 0 question 3.
+- `--print-timeout 240s` aligns agy's internal print-mode wait with your
+  subprocess timeout.
+- No system-prompt flag: prepend an `[Instructions]` block exactly like
+  Codex (section 6).
+- No reasoning-effort flag: **the effort level is part of the model label**
+  ("Gemini 3.5 Flash (Low)" vs "(High)"). Ignore your app's effort setting
+  for agy models.
+
+### TTY behavior (MUST know, or everything appears broken)
+
+- Only `-p`/`--print` mode works headless. `agy models`, `agy` interactive
+  mode, and most subcommands **hang forever without a real terminal** — do
+  not call them from your app, not even with output redirected to a file.
+- Print mode works from ordinary subprocess pipes on agy 1.1.1. Older
+  versions silently dropped stdout under pipes (google-antigravity issue
+  #76); after any agy update, re-verify with one piped `pong` test before
+  trusting it.
+- Sign-in is interactive-only. If agy is not signed in, print mode hangs or
+  errors — your timeout is the backstop; tell the user to run `agy` once in
+  their own terminal.
+
+### The silent-model-substitution trap (real bug, MUST handle)
+
+`--model` accepts the **exact display label** shown by `agy models`
+(e.g. `"Gemini 3.5 Flash (Low)"`). For ANY name it does not recognize —
+including plausible slug spellings like `gemini-3.5-flash-low` — agy prints
+**no error, exits 0, and silently runs the user's default model instead**.
+Some unrecognized-but-accepted spellings even resolve to a different
+reasoning level than requested. Never trust exit code + output alone.
+
+The only place the real selection is visible is agy's run log. Pass
+`--log-file <path inside your throwaway temp dir>` and verify after the run:
+
+1. If the log contains `Failed to resolve model flag` → the name was
+   rejected; raise "model list has changed; run `agy models` and reselect".
+2. If a specific model was requested, require
+   `label="<requested label>"` to appear in the log; otherwise raise the
+   same error. On success, that label is your provenance string.
+3. For the "CLI default" entry (no `--model` flag), extract the last
+   `label="…"` occurrence as the served model for provenance.
+
+### Model discovery (static list, log-verified)
+
+`agy models` needs a real TTY, and there is no local cache file to read
+(unlike Codex), so you cannot discover models programmatically. Ship a
+static list captured from a real `agy models` run, plus a "CLI default"
+entry, and rely on the log verification above to convert list drift into a
+clear user-facing error instead of silent wrong-model spend. Snapshot from
+agy 1.1.1 (2026-07-11):
+
+```
+Gemini 3.5 Flash (Medium)   Gemini 3.5 Flash (High)   Gemini 3.5 Flash (Low)
+Gemini 3.1 Pro (Low)        Gemini 3.1 Pro (High)
+Claude Sonnet 4.6 (Thinking)  Claude Opus 4.6 (Thinking)  GPT-OSS 120B (Medium)
+```
+
+When capturing your own snapshot, ask the user to run `agy models` and paste
+the output — do not try to automate a TTY.
+
+### Differences from Claude Code / Codex (memorize these four)
+
+1. Prompt on **argv**, not stdin (with the ~30000-character guard).
+2. Plain-text stdout; no JSON parsing, no `modelUsage` — provenance comes
+   from the `--log-file` label check instead.
+3. Model names are display labels, silently substituted when wrong — the
+   log verification is mandatory, not optional.
+4. No effort flag; reasoning level is baked into the model label.
+
+## 7. Step 4 — Multi-turn conversations (all CLIs)
+
+The CLIs take one prompt per invocation and remember nothing. Replay the
 history as a labelled transcript each turn. Given an OpenAI-style messages
 array (`[{role, content}, ...]`):
 
@@ -466,7 +567,8 @@ Every request spends the user's paid subscription usage, so:
   ("Command-line models are switched off. Enable them in settings.").
 - Persist the effort level too (e.g. `cli_reasoning_effort`, default `""` =
   CLI's own default). Valid values: `"" | low | medium | high | xhigh | max`
-  (clamped for Codex per section 6).
+  (clamped for Codex per section 6; ignored for Antigravity per section 6b —
+  its reasoning level is part of the model label).
 
 ### UI (SHOULD)
 
@@ -486,8 +588,10 @@ Append a small footer to every non-JSON reply:
 ```
 
 Format: `*(via <runner>[ · <exact served model id>][ · effort <level>])*` —
-runner is `Claude Code` or `Codex CLI`; the served model comes from the
-`modelUsage` logic in section 5 (Codex doesn't report one; omit it).
+runner is `Claude Code`, `Codex CLI`, or `Antigravity CLI`; the served model
+comes from the `modelUsage` logic in section 5 for Claude and from the
+log-verified label in section 6b for Antigravity (Codex doesn't report one;
+omit it).
 
 ## 10. Step 7 — Concurrency, timeouts, and safety rails
 
@@ -499,8 +603,9 @@ runner is `Claude Code` or `Codex CLI`; the served model comes from the
    files before answering are genuinely slow; 30–60 s timeouts cause spurious
    failures. On timeout, kill the process and report
    `"The CLI took longer than 240s and was stopped."`
-3. **Read-only, always.** Both invocations above are read-only by
-   construction (`--tools "Read,Glob,Grep"` / `--sandbox read-only`). If your
+3. **Read-only, always.** All invocations above are read-only by
+   construction (`--tools "Read,Glob,Grep"` / `--sandbox read-only` /
+   `--mode plan`). If your
    app lets models edit files, route those edits through your app's own
    propose → show diff → user approves → apply flow. Do not hand the CLI
    write access as a shortcut — you'd have two competing safety models.
@@ -651,8 +756,69 @@ def run_codex(path, system, prompt, cwd, effort):
         Path(out_path).unlink(missing_ok=True)
 
 
+AGY_MODELS = (  # snapshot of `agy models`; verified per-run via the log
+    "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Low)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)",
+    "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)",
+)
+AGY_PROMPT_LIMIT = 30000  # prompt travels on argv; Windows caps ~32767 chars
+
+
+def run_agy(path, model_label, system, prompt, cwd):
+    """Blocking. Returns (reply_text, confirmed_model_label).
+
+    model_label is the exact display label from `agy models`, or "" for the
+    user's default model.
+    """
+    if system.strip():
+        prompt = f"[Instructions]\n{system}\n\n{prompt}"
+    if len(prompt) > AGY_PROMPT_LIMIT:
+        raise CLIModelError(
+            f"This request is too long for the Antigravity CLI "
+            f"(over {AGY_PROMPT_LIMIT} characters)."
+        )
+    log_path = Path(cwd) / "agy_run.log"
+    command = wrap_command(path) + [
+        "-p", prompt,
+        "--mode", "plan",
+        "--print-timeout", "240s",
+        "--log-file", str(log_path),
+    ]
+    if model_label:
+        command += ["--model", model_label]
+    result = subprocess.run(
+        command, input="", capture_output=True, text=True,
+        encoding="utf-8", errors="replace", cwd=cwd,
+        timeout=SUBPROCESS_TIMEOUT,
+    )
+    text = str(result.stdout or "").strip()
+    if result.returncode != 0 or not text:
+        raise CLIModelError(
+            f"agy exited with {result.returncode}: "
+            f"{(result.stderr or result.stdout or '').strip()[:300]}"
+        )
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        log_text = ""
+    # agy silently substitutes its default model for unknown names (exit 0);
+    # the run log is the only place the real selection is visible.
+    if model_label:
+        if ("Failed to resolve model flag" in log_text
+                or f'label="{model_label}"' not in log_text):
+            raise CLIModelError(
+                f"Antigravity CLI did not run {model_label!r}. Its model "
+                "list has probably changed; run 'agy models' and reselect."
+            )
+        return text, model_label
+    import re
+    served = re.findall(r'label="([^"]+)"', log_text)
+    return text, served[-1] if served else ""
+
+
 async def converse(model, messages, cwd, effort="", json_only=False):
-    """Entry point. model: 'claude-<alias>' or 'codex'."""
+    """Entry point. model: 'claude-<alias>', 'codex', or 'agy[-<slug>]'."""
     system, prompt = flatten_messages(messages)
     if json_only:
         system = (
@@ -689,6 +855,32 @@ async def converse(model, messages, cwd, effort="", json_only=False):
             raise CLIModelError("The CLI took longer than 240s and was stopped.")
         footer = "" if json_only else (
             f"\n\n*(via Codex CLI{' · effort ' + effort if effort else ''})*"
+        )
+        return text + footer
+    if model == "agy" or model.startswith("agy-"):
+        path = resolve_cli("agy")
+        if not path:
+            raise CLIModelError("The Antigravity CLI (agy) was not found on PATH.")
+        # App model ids are slugified labels, e.g. "agy-gemini-3.5-flash-low";
+        # map the id back to the exact display label before invoking.
+        import re as _re
+        label = ""
+        if model != "agy":
+            by_slug = {
+                "agy-" + _re.sub(r"[^a-z0-9.]+", "-", l.lower()).strip("-"): l
+                for l in AGY_MODELS
+            }
+            label = by_slug.get(model, "")
+            if not label:
+                raise CLIModelError(f"Unknown Antigravity model {model!r}.")
+        try:
+            text, served = await asyncio.to_thread(
+                run_agy, path, label, system, prompt, cwd
+            )
+        except subprocess.TimeoutExpired:
+            raise CLIModelError("The CLI took longer than 240s and was stopped.")
+        footer = "" if json_only else (
+            f"\n\n*(via Antigravity CLI{' · ' + served if served else ''})*"
         )
         return text + footer
     raise CLIModelError(f"Unknown command-line model {model!r}.")
@@ -821,17 +1013,67 @@ async function runCodex(cliPath, system, prompt, cwd, effort) {
   }
 }
 
-module.exports = { resolveCli, flattenMessages, runClaude, runCodex, CLAUDE_ALIASES };
+const AGY_MODELS = [ // snapshot of `agy models`; verified per-run via the log
+  "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)",
+  "Gemini 3.5 Flash (Low)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)",
+  "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)",
+  "GPT-OSS 120B (Medium)",
+];
+const AGY_PROMPT_LIMIT = 30000; // prompt travels on argv; Windows caps ~32767
+
+async function runAgy(cliPath, modelLabel, system, prompt, cwd) {
+  if (system.trim()) prompt = `[Instructions]\n${system}\n\n${prompt}`;
+  if (prompt.length > AGY_PROMPT_LIMIT)
+    throw new Error(
+      `This request is too long for the Antigravity CLI (over ${AGY_PROMPT_LIMIT} characters).`
+    );
+  const logPath = path.join(cwd, "agy_run.log");
+  const args = [
+    "-p", prompt,
+    "--mode", "plan",
+    "--print-timeout", "240s",
+    "--log-file", logPath,
+  ];
+  if (modelLabel) args.push("--model", modelLabel);
+  const { code, stdout, stderr } = await runProcess(cliPath, args, { cwd, input: "" });
+  const text = String(stdout || "").trim();
+  if (code !== 0 || !text)
+    throw new Error(`agy exited with ${code}: ${(stderr || stdout).trim().slice(0, 300)}`);
+  let logText = "";
+  try { logText = fs.readFileSync(logPath, "utf-8"); } catch {}
+  // agy silently substitutes its default model for unknown names (exit 0);
+  // the run log is the only place the real selection is visible.
+  if (modelLabel) {
+    if (
+      logText.includes("Failed to resolve model flag") ||
+      !logText.includes(`label="${modelLabel}"`)
+    )
+      throw new Error(
+        `Antigravity CLI did not run ${modelLabel}. Its model list has ` +
+          "probably changed; run 'agy models' and reselect."
+      );
+    return { text, served: modelLabel };
+  }
+  const served = [...logText.matchAll(/label="([^"]+)"/g)].map((m) => m[1]);
+  return { text, served: served.length ? served[served.length - 1] : "" };
+}
+
+module.exports = {
+  resolveCli, flattenMessages, runClaude, runCodex, runAgy,
+  CLAUDE_ALIASES, AGY_MODELS,
+};
 ```
 
 ## 13. Wiring it into the host app's model list
 
 - **Model ids:** if `claude` is detected, add `claude-sonnet`, `claude-opus`,
   `claude-haiku`, `claude-fable` to the picker; if `codex` is detected, add
-  `codex`. Only while the opt-in toggle is ON.
+  `codex` plus one id per discovered slug; if `agy` is detected, add `agy`
+  (CLI default) plus one slugified id per snapshot label
+  (e.g. `agy-gemini-3.5-flash-low`). Only while the opt-in toggle is ON.
 - **Routing:** a request for any of those ids goes to this module; everything
   else goes to the app's existing providers. Match by prefix
-  (`claude-<known alias>`) and exact id (`codex`).
+  (`claude-<known alias>`, `agy-<slug>`) and exact id (`codex`, `agy`).
 - **Interface parity:** if the app's provider interface has `max_tokens` or
   temperature parameters, accept and ignore them — the CLIs budget their own
   output.
@@ -881,6 +1123,14 @@ multi-model or failover feature (question 4).
    exactly: pong" → "pong" with a Codex footer.
 9. **Effort setting:** set effort to `low`, send a trivial prompt → footer
    shows "effort low".
+9b. **Antigravity smoke test** (if installed): pick a cheap Flash model by
+    its exact label id, send "Reply with exactly: pong" → "pong" with an
+    Antigravity footer naming that same label (proves the log verification
+    confirmed the requested model actually served).
+9c. **Antigravity substitution guard:** temporarily add a fake label to the
+    static model list, request it → clean "did not run …; run 'agy models'"
+    error, NOT a silent success. Remove the fake afterwards. (Costs one
+    request on the default model.)
 10. **Timeout path (optional):** temporarily set the timeout to 1 s, send any
     prompt → clean "took longer than" error, no zombie process, UI usable.
     Restore 240 s afterwards.
@@ -907,6 +1157,11 @@ multi-model or failover feature (question 4).
 | Multi-model features break when one CLI model errors | CLI backend raises where the app expects error return values | Match the host error contract per Step 0 question 2 |
 | Only a single generic `codex` model shows up | Model list hard-coded instead of discovered | Read `~/.codex/models_cache.json` + `config.toml` per section 6 |
 | Codex model list wrong/empty after a CLI update | Cache format changed (it's undocumented) | The graceful fallback to bare `codex` is by design; update the parser |
+| `agy models` / `agy` hangs forever from your app | Those surfaces need a real TTY | Only `-p` print mode works headless (section 6b); get the model list from the user |
+| agy ran the wrong (default) model with exit 0 | Unknown `--model` names are silently substituted | Pass exact display labels and verify `label="…"` in the `--log-file` (section 6b) |
+| agy `-p` returns nothing through pipes after an update | Regression of the non-TTY stdout bug (issue #76) | Re-run one piped `pong` test per agy update; fall back to file-redirected output if needed |
+| `agy` not found right after install | Installer updates registry PATH without broadcasting the change | New terminals/apps see it after a `WM_SETTINGCHANGE` broadcast, re-login, or reboot |
+| Very long chat fails only on Antigravity | Prompt travels on argv; Windows command-line limit | The ~30000-character guard in section 6b; shorten history or route long chats elsewhere |
 | UI freezes or shows nothing for ~20s, then everything at once | Streaming consumer fed a non-streaming CLI reply with no waiting state | Step 0 question 8: yield-once adaptation + a visible pending indicator |
 | CLI request fired on an automatic hot path (per keystroke/sentence) | Single-backend app routed ALL call sites through the new seam | Step 0 question 7: route only explicitly-picked, latency-tolerant flows |
 
@@ -925,6 +1180,9 @@ multi-model or failover feature (question 4).
 - [ ] Codex invoked with `exec --sandbox read-only --skip-git-repo-check --color never --cd <folder> -o <tempfile> -`; temp file cleaned up
 - [ ] Codex system prompt prepended as `[Instructions]` block; effort clamped to the chosen model's supported levels (`high` when unknown)
 - [ ] Codex models discovered from `~/.codex/models_cache.json` (visibility == "list") with the config.toml default labelled; graceful fallback to bare `codex` when either file is unreadable
+- [ ] Antigravity invoked with `-p <prompt> --mode plan --print-timeout 240s --log-file <tempfile>` (+ `--model "<exact label>"`); prompt on argv with the ~30000-character guard; empty stdin
+- [ ] Antigravity model selection verified against the run log (`Failed to resolve` absent AND `label="<requested>"` present); silent default substitution surfaces as a clear error
+- [ ] Antigravity model list is a static snapshot from a real `agy models` run (needs a TTY — ask the user); effort setting ignored for agy models
 - [ ] Multi-turn history flattened to the labelled transcript with the closing instruction block
 - [ ] Subprocess never blocks the event loop; 240 s timeout with a clean error
 - [ ] Feature default-OFF, persisted toggle, clear "spends your subscription" label

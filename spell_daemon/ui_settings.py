@@ -9,7 +9,8 @@ from tkinter import filedialog, messagebox
 from . import constants as c
 from . import llm
 from . import diagnostics
-from .llm import fetch_cloud_models, CLOUD_PROVIDERS, connect_server, detect_local_server, connect_cloud, free_chat_stream, _stream_cancel, _streaming_answer, _strip_reasoning
+from .llm import fetch_cloud_models, CLOUD_PROVIDERS, connect_server, detect_local_server, connect_cloud, connect_cli, free_chat_stream, _stream_cancel, _streaming_answer, _strip_reasoning
+from .cli_models import detect_clis, EFFORT_LEVELS
 from .constants import BG, DEFAULT_CFG, GPU_OPTIONS, N_CTX_OPTIONS, WORKING_LANGUAGE_OPTIONS, REPHRASE_MODES, _BUILTIN_MODES, _FACTORY_PROMPTS, _is_answer_mode, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _OS_RESERVED_HOTKEYS, _OS_RESERVED_HOTKEY_REASONS
 from .config import (
     save_cfg,
@@ -206,20 +207,21 @@ def _lerp(a, b, t):
 
 def _make_toggle(parent, variable, text, state="normal", command=None):
     outer = tk.Frame(parent, bg=BG)
+    live_state = {"value": state}
 
     cvs = tk.Canvas(outer, width=_TGL_W, height=_TGL_H,
                     bg=BG, highlightthickness=0,
-                    cursor=("hand2" if state == "normal" else ""))
+                    cursor=("hand2" if live_state["value"] == "normal" else ""))
     cvs.pack(side="left", padx=(0, 8))
 
     lbl = tk.Label(outer, text=text, font=FONT_B, bg=BG,
-                   fg=TEXT if state == "normal" else MUTED)
+                   fg=TEXT if live_state["value"] == "normal" else MUTED)
     lbl.pack(side="left")
 
     def _target():
         """Resting (knob_x, track_rgb) for the variable's current value."""
         on    = variable.get()
-        track = ACCENT2 if (on and state == "normal") else SURF2
+        track = ACCENT2 if (on and live_state["value"] == "normal") else SURF2
         return (_ON_X if on else _OFF_X), _hex_to_rgb(track)
 
     # Current drawn state, advanced frame-by-frame by the animation.
@@ -274,11 +276,17 @@ def _make_toggle(parent, variable, text, state="normal", command=None):
         _step(1)
 
     def _click(_event=None):
-        if state != "normal":
+        if live_state["value"] != "normal":
             return
         variable.set(not variable.get())
         if command:
             command()
+
+    def _set_state(value):
+        live_state["value"] = "normal" if value == "normal" else "disabled"
+        cvs.config(cursor="hand2" if live_state["value"] == "normal" else "")
+        lbl.config(fg=TEXT if live_state["value"] == "normal" else MUTED)
+        _animate()
 
     cvs.bind("<Button-1>", _click)
     lbl.bind("<Button-1>", _click)
@@ -287,6 +295,9 @@ def _make_toggle(parent, variable, text, state="normal", command=None):
     # Expose the text label so callers can attach tooltips to a leaf widget
     # rather than the container frame (frame <Enter>/<Leave> misfires on children).
     outer.label = lbl
+    outer.variable = variable
+    outer.invoke = _click
+    outer.set_state = _set_state
     return outer
 
 
@@ -398,11 +409,17 @@ def _build_status_tab(ui):
         if state.get("last_error"):
             return "Needs attention", "Check Last error below, then retry the action that failed.", ERR
         if not backend_ready:
+            if backend_mode == "cli" and not cfg.get("cli_models_enabled", False):
+                return "Needs consent", "Enable AI CLI models in the Model tab, then choose a detected model.", WARN
+            if backend_mode == "cli" and not cfg.get("cli_model", "").strip():
+                return "Needs setup", "Choose a detected command-line model in the Model tab.", WARN
             if backend_mode == "cloud" and not cfg.get("cloud_api_key", "").strip():
                 return "Needs setup", "Add an API key in the Model tab, then click Test & Connect.", WARN
             return "Needs setup", "Choose or test a backend in the Model tab.", WARN
         if mode == "Off":
             return "Ready, spell check off", "Turn Writing mode to Toast or Auto to get sentence corrections. Assistant hotkeys still work.", WARN
+        if backend_mode == "cli" and not cfg.get("cli_spell_check_enabled", False):
+            return "Ready, CLI spell check off", "Manual Understand, Improve Writing, follow-ups, and Chat are ready. Automatic CLI spell-check remains off.", SUCCESS
         if state.get("busy"):
             return "Working", "Wait for the current correction or rephrase to finish.", ACCENT2
         return "Ready", "Select text to understand it, or use Improve Writing on selected or typed text.", SUCCESS
@@ -487,7 +504,7 @@ def _build_model_tab(ui):
     # Determine initial mode from config. Prefer the explicit backend_mode; fall
     # back to inferring from server_url for configs saved before it existed.
     _init_mode = cfg.get("backend_mode", "")
-    if _init_mode not in ("local", "server", "cloud"):
+    if _init_mode not in ("local", "server", "cloud", "cli"):
         _init_mode = "server" if cfg.get("server_url", "").strip() else "local"
     backend_var = tk.StringVar(master=win, value=_init_mode)
 
@@ -509,6 +526,10 @@ def _build_model_tab(ui):
                    command=lambda: _on_backend_switch()).pack(side="left", padx=(0, 16))
     tk.Radiobutton(rb_frame, text="Cloud API", variable=backend_var,
                    value="cloud", font=FONT_B, bg=BG, fg=TEXT,
+                   activebackground=BG, selectcolor=SURFACE,
+                   command=lambda: _on_backend_switch()).pack(side="left", padx=(0, 16))
+    tk.Radiobutton(rb_frame, text="AI CLI", variable=backend_var,
+                   value="cli", font=FONT_B, bg=BG, fg=TEXT,
                    activebackground=BG, selectcolor=SURFACE,
                    command=lambda: _on_backend_switch()).pack(side="left")
 
@@ -947,11 +968,195 @@ def _build_model_tab(ui):
     ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     # ── Show/hide sub-panels based on radio selection ─────────────────────────
+    # Command-line AI sub-panel. Detection is local/free and reruns whenever a
+    # new Settings window is constructed.
+    cli_frame = tk.Frame(mf, bg=BG)
+    cli_frame.columnconfigure(1, weight=1)
+    cli_enabled_var = tk.BooleanVar(master=win, value=cfg.get("cli_models_enabled", False))
+    cli_model_var = tk.StringVar(master=win, value=cfg.get("cli_model", ""))
+    cli_effort_var = tk.StringVar(
+        master=win, value=cfg.get("cli_reasoning_effort", "") or "Default"
+    )
+    cli_spell_var = tk.BooleanVar(
+        master=win,
+        value=bool(
+            cfg.get("cli_models_enabled", False)
+            and cfg.get("cli_spell_check_enabled", False)
+        ),
+    )
+    cli_status_var = tk.StringVar(master=win, value="")
+
+    try:
+        cli_detection = detect_clis()
+    except Exception as exc:
+        diagnostics.record("backend", "error", "AI CLI detection failed.", str(exc))
+        cli_detection = {
+            "claude": {"path": None, "models": []},
+            "codex": {"path": None, "models": [], "default_model": ""},
+            "antigravity": {"path": None, "models": []},
+        }
+    cli_models = (
+        cli_detection["claude"]["models"]
+        + cli_detection["codex"]["models"]
+        + cli_detection["antigravity"]["models"]
+    )
+    cli_model_ids = [entry["id"] for entry in cli_models]
+
+    cli_main_toggle = None
+    cli_spell_toggle = None
+    cli_model_cb = None
+    cli_effort_cb = None
+    cli_status_lbl = None
+
+    def _refresh_cli_controls():
+        enabled = bool(cli_enabled_var.get())
+        if not enabled and cli_spell_var.get():
+            cli_spell_var.set(False)
+        cli_model_cb.config(
+            values=cli_model_ids if enabled else [],
+            state="readonly" if enabled and cli_model_ids else "disabled",
+        )
+        cli_effort_cb.config(state="readonly" if enabled else "disabled")
+        cli_spell_toggle.set_state("normal" if enabled else "disabled")
+
+        selected = cli_model_var.get().strip()
+        if not enabled:
+            cli_status_var.set("Command-line models are switched off.")
+            cli_status_lbl.config(fg=MUTED)
+        elif not cli_model_ids:
+            cli_status_var.set("No supported AI CLI was found on PATH.")
+            cli_status_lbl.config(fg=ERR)
+        elif not selected:
+            cli_status_var.set("Choose a detected command-line model.")
+            cli_status_lbl.config(fg=WARN)
+        elif selected not in cli_model_ids:
+            cli_status_var.set(f"Saved model is not currently available: {selected}")
+            cli_status_lbl.config(fg=ERR)
+        else:
+            cli_status_var.set(f"Ready to select {selected} on Save & Connect.")
+            cli_status_lbl.config(fg=SUCCESS)
+
+    def _on_cli_enabled_toggle():
+        if cli_enabled_var.get():
+            allowed = messagebox.askokcancel(
+                "Enable AI CLI models?",
+                "Selected text and chat prompts will leave this computer through "
+                "your signed-in Claude, Codex, or Antigravity CLI. Every request "
+                "spends that subscription's usage. Vedium never reads or stores "
+                "the CLI's credentials.\n\nContinue?",
+                parent=win,
+                icon="warning",
+            )
+            if not allowed:
+                cli_enabled_var.set(False)
+            else:
+                diagnostics.record("config", "info", "AI CLI models enabled with consent.")
+        else:
+            cli_spell_var.set(False)
+        _refresh_cli_controls()
+
+    def _on_cli_spell_toggle():
+        if cli_spell_var.get():
+            allowed = messagebox.askokcancel(
+                "Enable automatic CLI spell-check?",
+                "Vedium will send an AI CLI subscription request whenever "
+                "you complete a sentence with configured punctuation. This can "
+                "spend usage repeatedly while you type, and each result may take "
+                "many seconds. Slow results are shown for review instead of being "
+                "replaced automatically.\n\nEnable automatic CLI spell-check?",
+                parent=win,
+                icon="warning",
+            )
+            if not allowed:
+                cli_spell_var.set(False)
+            else:
+                diagnostics.record(
+                    "config", "warning", "Automatic CLI spell-check enabled with consent."
+                )
+        _refresh_cli_controls()
+
+    cli_main_toggle = _make_toggle(
+        cli_frame, cli_enabled_var, "Use installed AI CLIs as models",
+        command=_on_cli_enabled_toggle,
+    )
+    cli_main_toggle.grid(row=0, column=0, columnspan=2, sticky="w")
+    tk.Label(
+        cli_frame,
+        text="Prompts leave this computer and each request spends your CLI subscription usage.",
+        font=("Segoe UI", 8), bg=BG, fg=WARN, wraplength=500, justify="left",
+    ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(_TGL_INDENT, 0), pady=(2, 7))
+
+    for row, (key, title) in enumerate((
+        ("claude", "Claude Code"),
+        ("codex", "Codex CLI"),
+        ("antigravity", "Antigravity CLI"),
+    ), start=2):
+        info = cli_detection[key]
+        path = info.get("path")
+        count = len(info.get("models", []))
+        if path:
+            suffix = f"found - {count} model{'s' if count != 1 else ''}"
+            if key == "codex" and info.get("default_model"):
+                suffix += f"; default {info['default_model']}"
+            colour = SUCCESS
+        else:
+            suffix = "not found on PATH - install the CLI and sign in once in your terminal"
+            colour = MUTED
+        detected_lbl = tk.Label(
+            cli_frame, text=f"{title}: {suffix}", font=("Segoe UI", 8),
+            bg=BG, fg=colour, anchor="w", justify="left", wraplength=500,
+        )
+        detected_lbl.grid(row=row, column=0, columnspan=2, sticky="w", pady=1)
+        _add_tooltip(
+            detected_lbl,
+            str(path) if path else "Install the CLI and sign in once in your own terminal.",
+        )
+
+    tk.Label(cli_frame, text="Model", font=("Segoe UI", 9), bg=BG, fg=MUTED).grid(
+        row=5, column=0, sticky="w", padx=(0, 8), pady=(8, 3)
+    )
+    cli_model_cb = ttk.Combobox(
+        cli_frame, textvariable=cli_model_var, values=[], state="disabled", font=FONT_B,
+    )
+    cli_model_cb.grid(row=5, column=1, sticky="ew", pady=(8, 3))
+    _bind_scroll(cli_model_cb)
+
+    tk.Label(cli_frame, text="Reasoning effort", font=("Segoe UI", 9), bg=BG, fg=MUTED).grid(
+        row=6, column=0, sticky="w", padx=(0, 8), pady=3
+    )
+    cli_effort_cb = ttk.Combobox(
+        cli_frame, textvariable=cli_effort_var,
+        values=("Default", *EFFORT_LEVELS[1:]), state="disabled", font=FONT_B,
+    )
+    cli_effort_cb.grid(row=6, column=1, sticky="w", pady=3)
+    _bind_scroll(cli_effort_cb)
+
+    cli_spell_toggle = _make_toggle(
+        cli_frame, cli_spell_var, "Allow automatic spell-check with AI CLI",
+        state="disabled", command=_on_cli_spell_toggle,
+    )
+    cli_spell_toggle.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    tk.Label(
+        cli_frame,
+        text="Default OFF. Manual Understand, Improve Writing, follow-ups, and Chat still work.",
+        font=("Segoe UI", 8), bg=BG, fg=MUTED, wraplength=500, justify="left",
+    ).grid(row=8, column=0, columnspan=2, sticky="w", padx=(_TGL_INDENT, 0), pady=(2, 0))
+
+    cli_status_lbl = tk.Label(
+        cli_frame, textvariable=cli_status_var, font=("Segoe UI", 8), bg=BG, fg=MUTED,
+        wraplength=500, justify="left",
+    )
+    cli_status_lbl.grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
+    _refresh_cli_controls()
+
     def _on_backend_switch():
-        for f in (local_frame, server_frame, cloud_frame):
+        for f in (local_frame, server_frame, cloud_frame, cli_frame):
             f.grid_remove()
         mode = backend_var.get()
-        panel = {"local": local_frame, "server": server_frame, "cloud": cloud_frame}.get(mode, local_frame)
+        panel = {
+            "local": local_frame, "server": server_frame,
+            "cloud": cloud_frame, "cli": cli_frame,
+        }.get(mode, local_frame)
         panel.grid(row=1, column=0, columnspan=2, sticky="ew")
 
     # Apply initial visibility
@@ -1043,6 +1248,10 @@ def _build_model_tab(ui):
     ui.remember_key_var = remember_key_var
     ui.cloud_keys, ui.favorites = _cloud_keys, _favorites
     ui.remember_provider_key = _remember_provider_key
+    ui.cli_enabled_var, ui.cli_model_var = cli_enabled_var, cli_model_var
+    ui.cli_effort_var, ui.cli_spell_var = cli_effort_var, cli_spell_var
+    ui.cli_model_ids = list(cli_model_ids)
+    ui.cli_effort_value = lambda: "" if cli_effort_var.get() == "Default" else cli_effort_var.get()
     ui.fmt_var, ui.gpu_var, ui.ctx_var = fmt_var, gpu_var, ctx_var
 
 
@@ -1218,6 +1427,8 @@ def _build_setup_tab(ui):
     backend_var, model_var = ui.backend_var, ui.model_var
     server_url_var, autodetect_var = ui.server_url_var, ui.autodetect_var
     cloud_key_var, cloud_model_var = ui.cloud_key_var, ui.cloud_model_var
+    cli_enabled_var, cli_model_var = ui.cli_enabled_var, ui.cli_model_var
+    cli_model_ids = ui.cli_model_ids
     sc_mode_var, lang_var = ui.sc_mode_var, ui.lang_var
 
     setup_vars = {}
@@ -1332,6 +1543,19 @@ def _build_setup_tab(ui):
         if backend_now:
             backend_txt = f"Ready: {backend_now}"
             backend_col = SUCCESS
+        elif mode == "cli":
+            if not cli_enabled_var.get():
+                backend_txt = "AI CLI models are switched off. Enable them in the Model tab."
+                backend_col = WARN
+            elif not cli_model_var.get().strip():
+                backend_txt = "Needs a command-line model selection."
+                backend_col = WARN
+            elif cli_model_var.get().strip() not in cli_model_ids:
+                backend_txt = "The selected command-line model is not currently detected."
+                backend_col = ERR
+            else:
+                backend_txt = f"AI CLI selected: {cli_model_var.get().strip()}. Click Save & Connect."
+                backend_col = WARN
         elif mode == "cloud":
             if not cloud_key_var.get().strip():
                 backend_txt = "Needs API key for the selected cloud provider."
@@ -2277,6 +2501,9 @@ def _build_bottom_bar(ui):
     remember_key_var = ui.remember_key_var
     _cloud_keys, _favorites = ui.cloud_keys, ui.favorites
     _remember_provider_key = ui.remember_provider_key
+    cli_enabled_var, cli_model_var = ui.cli_enabled_var, ui.cli_model_var
+    cli_effort_var, cli_spell_var = ui.cli_effort_var, ui.cli_spell_var
+    _cli_effort_value = ui.cli_effort_value
     fmt_var, gpu_var, ctx_var = ui.fmt_var, ui.gpu_var, ui.ctx_var
     lang_var, sc_mode_var, diacr_var = ui.lang_var, ui.sc_mode_var, ui.diacr_var
     _trig_string = ui.trig_string
@@ -2316,6 +2543,9 @@ def _build_bottom_bar(ui):
         old_cloud_base_url = cfg.get("cloud_base_url")
         old_cloud_api_key = cfg.get("cloud_api_key")
         old_cloud_model = cfg.get("cloud_model")
+        old_cli_enabled = cfg.get("cli_models_enabled", False)
+        old_cli_model = cfg.get("cli_model", "")
+        old_cli_effort = cfg.get("cli_reasoning_effort", "")
         old_gpu = cfg.get("gpu_acceleration")
         old_n_ctx = cfg.get("n_ctx")
 
@@ -2329,6 +2559,11 @@ def _build_bottom_bar(ui):
                 old_cloud_api_key != cloud_key_var.get().strip() or
                 old_cloud_model != cloud_model_var.get().strip()
             )) or
+            (mode == "cli" and (
+                old_cli_enabled != bool(cli_enabled_var.get()) or
+                old_cli_model != cli_model_var.get().strip() or
+                old_cli_effort != _cli_effort_value()
+            )) or
             old_gpu != gpu_var.get() or
             old_n_ctx != ctx_var.get()
         )
@@ -2340,6 +2575,12 @@ def _build_bottom_bar(ui):
         cfg["cloud_base_url"]         = cloud_url_var.get().strip()
         cfg["cloud_api_key"]          = cloud_key_var.get().strip()
         cfg["cloud_model"]            = cloud_model_var.get().strip()
+        cfg["cli_models_enabled"]     = bool(cli_enabled_var.get())
+        cfg["cli_model"]              = cli_model_var.get().strip()
+        cfg["cli_reasoning_effort"]   = _cli_effort_value()
+        cfg["cli_spell_check_enabled"] = bool(
+            cli_enabled_var.get() and cli_spell_var.get()
+        )
         cfg["remember_cloud_api_key"] = bool(remember_key_var.get())
         # Keep provider keys in memory for this run; save_cfg strips secrets from disk.
         _remember_provider_key(cloud_provider_var.get(), cloud_key_var.get().strip())
@@ -2387,7 +2628,12 @@ def _build_bottom_bar(ui):
 
         def _load():
             try:
-                if mode == "cloud":
+                if mode == "cli":
+                    backend = connect_cli(
+                        cfg["cli_model"], cfg["cli_models_enabled"],
+                        cfg["cli_reasoning_effort"],
+                    )
+                elif mode == "cloud":
                     backend = connect_cloud(
                         cfg["cloud_base_url"], cfg["cloud_api_key"], cfg["cloud_model"],
                         cfg_n_ctx=max(cfg.get("n_ctx", 4096), 8192),
@@ -2433,7 +2679,8 @@ def _build_bottom_bar(ui):
 
         if model_changed:
             status.config(
-                text={"cloud": "Saved. Connecting to cloud API…",
+                text={"cli": "Saved. Selecting command-line model…",
+                      "cloud": "Saved. Connecting to cloud API…",
                       "server": "Saved. Connecting to server…"}.get(mode, "Saved. Loading model…"),
                 fg=WARN,
             )
@@ -2900,6 +3147,7 @@ def _open_chat_window_ui(cfg: dict):
 
         # Display AI label and stream placeholder
         _append_display("\nAI\n", "ai_name")
+        _append_display("💭 Thinking…", "ai_stream")
 
         def _stream_worker():
             chunks = []

@@ -13,6 +13,12 @@ from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _w
 from spell_daemon.config import load_cfg
 from spell_daemon.prompt_builder import _build_prompt, _build_chat_prompt
 from spell_daemon import diagnostics
+from spell_daemon.cli_models import (
+    CLIClient,
+    CLIModelError,
+    provenance_footer,
+    selectable_models,
+)
 
 # LLM globals, matching the namespace of the original module
 _llm = None
@@ -314,6 +320,13 @@ def _backend_unavailable_message(cfg: dict | None = None, feature: str = "chat")
             return action + " The local server is selected, but it is not connected yet. Open Settings and click Test / Auto-Detect."
         return action + " The local server mode is selected, but no server URL is set. Open Settings and configure or auto-detect a server."
 
+    if mode == "cli":
+        if not cfg.get("cli_models_enabled", False):
+            return action + " Command-line models are switched off. Enable them in Settings."
+        if not cfg.get("cli_model", "").strip():
+            return action + " No command-line model is selected. Open Settings and choose one."
+        return action + " The selected command-line model is unavailable. Open Settings and check its installation."
+
     if mode == "local":
         path = cfg.get("model_path", "").strip()
         if not path:
@@ -488,6 +501,44 @@ class _CloudClient:
             retry = dict(payload,
                          max_tokens=payload["max_tokens"] + _THINKING_BUDGET_AUTO)
             yield from self._iter_stream(retry, _is_retry=True)
+
+
+def connect_cli(model: str, enabled: bool, effort: str = "") -> str:
+    """Select an installed CLI backend without spending a model request."""
+    global _llm, _llm_path, _llm_backend
+
+    # Selection failure must not leave the previous backend resident: with the
+    # config already set to "cli", that would act like an invisible fallback.
+    with _llm_lock:
+        _llm = None
+        _llm_path = ""
+        _llm_backend = "None"
+    diagnostics.set_status(backend="None", backend_mode="cli")
+
+    if not enabled:
+        raise CLIModelError(
+            "Command-line models are switched off. Enable them in settings."
+        )
+    selected = next(
+        (entry for entry in selectable_models(True) if entry["id"] == model),
+        None,
+    )
+    if selected is None:
+        raise CLIModelError(
+            f"The command-line model {model!r} is not available. "
+            "Install/sign in to its CLI, then reopen Settings."
+        )
+
+    client = CLIClient(model, effort, enabled=True)
+    label = selected["label"]
+    with _llm_lock:
+        _llm = client
+        _llm_path = model
+        _llm_backend = f"AI CLI ({label})"
+
+    diagnostics.set_status(backend=_llm_backend, backend_mode="cli")
+    diagnostics.record("backend", "info", f"Selected command-line model {model}.")
+    return _llm_backend
 
 
 def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192) -> str:
@@ -811,11 +862,28 @@ def _cloud_stream_with_fallback(messages: list, *, max_tokens: int,
     raise _cloud_fallback_error(transient_errors)
 
 
+def _cli_enabled_for_request(client: CLIClient, cfg: dict | None) -> bool:
+    return client.enabled if cfg is None else bool(cfg.get("cli_models_enabled", False))
+
+
+def _record_cli_provenance(provenance: dict) -> None:
+    diagnostics.record("backend", "info", provenance_footer(provenance))
+
+
 def _complete_prompt(prompt: str, *, max_tokens: int, temperature: float,
                      repeat_penalty: float = 1.0, stop=None, echo: bool = False,
-                     cfg: dict | None = None, on_fallback=None) -> dict:
+                     cfg: dict | None = None, on_fallback=None,
+                     messages: list[dict] | None = None) -> dict:
     """Run one completion, with favorite failover when the live backend is cloud."""
     client = _llm
+    if isinstance(client, CLIClient):
+        if messages is None:
+            raise CLIModelError("Command-line model request is missing semantic messages.")
+        text, provenance = client.complete(
+            messages, enabled=_cli_enabled_for_request(client, cfg)
+        )
+        _record_cli_provenance(provenance)
+        return {"choices": [{"text": text}], "cli_provenance": provenance}
     if isinstance(client, _CloudClient):
         return _cloud_complete_with_fallback(
             _prompt_to_messages(prompt), max_tokens=max_tokens,
@@ -829,9 +897,22 @@ def _complete_prompt(prompt: str, *, max_tokens: int, temperature: float,
 
 def _stream_prompt(prompt: str, *, max_tokens: int, temperature: float,
                    repeat_penalty: float = 1.0, stop=None, echo: bool = False,
-                   cfg: dict | None = None, on_fallback=None):
+                   cfg: dict | None = None, on_fallback=None,
+                   messages: list[dict] | None = None):
     """Stream one prompt, with quota failover for cloud backends."""
     client = _llm
+    if isinstance(client, CLIClient):
+        if messages is None:
+            raise CLIModelError("Command-line model request is missing semantic messages.")
+        if _stream_cancel.is_set():
+            return
+        text, provenance = client.complete(
+            messages, enabled=_cli_enabled_for_request(client, cfg)
+        )
+        _record_cli_provenance(provenance)
+        if not _stream_cancel.is_set():
+            yield {"choices": [{"text": text}], "cli_provenance": provenance}
+        return
     if isinstance(client, _CloudClient):
         yield from _cloud_stream_with_fallback(
             _prompt_to_messages(prompt), max_tokens=max_tokens,
@@ -1667,6 +1748,15 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
                 cooldown_sec=20.0,
             )
             return text
+        if isinstance(_llm, CLIClient) and not bool(
+            (cfg or {}).get("cli_spell_check_enabled", False)
+        ):
+            diagnostics.record_throttled(
+                "spell", "info",
+                "Automatic CLI spell-check is off; command-line model request skipped.",
+                cooldown_sec=20.0,
+            )
+            return text
 
         lang = (working_language or "Auto").strip()
 
@@ -1684,6 +1774,10 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
                 prompt, max_tokens=max_tok, temperature=0.0,
                 repeat_penalty=1.3, stop=stop, echo=False, cfg=cfg,
                 on_fallback=on_fallback,
+                messages=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
             )
             raw = out["choices"][0]["text"]
             _maybe_flag_reasoning_model(raw)
@@ -1791,6 +1885,10 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
             prompt, max_tokens=max_tok, temperature=0.0 if deterministic else 0.05,
             repeat_penalty=1.3, stop=stop, echo=False, cfg=cfg,
             on_fallback=on_fallback,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
         )
         raw = out["choices"][0]["text"]
         _maybe_flag_reasoning_model(raw)
@@ -1944,6 +2042,10 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
         for chunk in _stream_prompt(
             prompt, max_tokens=max_tok, temperature=temp, repeat_penalty=1.3,
             stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
         ):
             if _stream_cancel.is_set():
                 return
@@ -2023,6 +2125,10 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
         for chunk in _stream_prompt(
             prompt, max_tokens=max_tok, temperature=0.35, repeat_penalty=1.3,
             stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
+            messages=[
+                {"role": "system", "content": sys_msg},
+                {"role": "user", "content": user_msg},
+            ],
         ):
             if _stream_cancel.is_set():
                 return
@@ -2091,6 +2197,15 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
         except Exception:
             max_tok = min(max_tok, 2048)
 
+        if isinstance(_llm, CLIClient):
+            messages = _chat_history_to_messages(sys_msg, history)
+            text, provenance = _llm.complete(
+                messages, enabled=_cli_enabled_for_request(_llm, cfg)
+            )
+            _record_cli_provenance(provenance)
+            if not _stream_cancel.is_set():
+                yield f"{text}\n\n{provenance_footer(provenance)}"
+            return
         if isinstance(_llm, _CloudClient):
             messages = _chat_history_to_messages(sys_msg, history)
             # Chat has no toast to host the failover notice, so queue the

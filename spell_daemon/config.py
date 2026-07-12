@@ -284,7 +284,7 @@ def load_cfg() -> dict:
                 str(cfg.get("spell_check_mode")),
             )
             cfg["spell_check_mode"] = "Toast"
-        if cfg.get("backend_mode") not in ("local", "server", "cloud"):
+        if cfg.get("backend_mode") not in ("local", "server", "cloud", "cli"):
             diagnostics.record(
                 "config", "warning",
                 "Invalid backend mode in config; restored local mode.",
@@ -318,6 +318,22 @@ def load_cfg() -> dict:
     except Exception as exc:
         diagnostics.record("config", "warning", "Config could not be loaded; defaults restored.", str(exc))
         cfg = dict(c.DEFAULT_CFG)
+    cfg["cli_models_enabled"] = bool(cfg.get("cli_models_enabled", False))
+    # Turning the main consent off also revokes the automatic-use consent. This
+    # prevents spell-check from silently coming back on after CLI models are
+    # re-enabled later.
+    cfg["cli_spell_check_enabled"] = bool(
+        cfg.get("cli_spell_check_enabled", False) and cfg["cli_models_enabled"]
+    )
+    if cfg.get("cli_reasoning_effort", "") not in (
+        "", "low", "medium", "high", "xhigh", "max",
+    ):
+        diagnostics.record(
+            "config", "warning",
+            "Invalid CLI reasoning effort; restored the CLI default.",
+            str(cfg.get("cli_reasoning_effort")),
+        )
+        cfg["cli_reasoning_effort"] = ""
     _inject_stored_secrets(cfg)
     _inject_env_secrets(cfg)
     c.apply_scheme(cfg.get("colour_scheme", "Forest"))

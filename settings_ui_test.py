@@ -54,6 +54,14 @@ ui_settings.fetch_cloud_models = lambda *a, **k: []
 ui_settings.connect_cloud = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
 ui_settings.connect_server = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stubbed"))
 ui_settings.detect_local_server = lambda *a, **k: ""
+ui_settings.connect_cli = lambda *a, **k: "Stub CLI backend"
+ui_settings.detect_clis = lambda: {
+    "claude": {"path": r"C:\stub\claude.cmd", "models": [
+        {"id": "claude-haiku", "label": "Claude Code - Haiku", "efforts": ["low"]},
+    ]},
+    "codex": {"path": None, "default_model": "", "models": []},
+    "antigravity": {"path": None, "models": []},
+}
 
 cfg = sd_config.load_cfg()
 

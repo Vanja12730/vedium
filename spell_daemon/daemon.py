@@ -44,7 +44,9 @@ from spell_daemon.llm import (
     connect_server,
     detect_local_server,
     connect_cloud,
+    connect_cli,
 )
+from spell_daemon.cli_models import CLIModelError
 from spell_daemon.ui_toasts import (
     _Toast,
     _EditableToast,
@@ -58,6 +60,11 @@ from spell_daemon.ui_settings import (
     _open_chat_window,
 )
 from spell_daemon.ui_tray import _make_icon
+
+
+def _surface_cli_error(exc: Exception) -> None:
+    if isinstance(exc, CLIModelError):
+        _info_toast(f"AI CLI error: {exc}")
 
 
 @functools.lru_cache(maxsize=None)
@@ -625,6 +632,7 @@ class SpellDaemon:
             # LLM crash, OOM, or any other unexpected error — release the pending
             # lock so the daemon can continue processing future sentences.
             diagnostics.record("spell", "error", "Spell-check pipeline failed.", str(exc))
+            _surface_cli_error(exc)
             self.buf.finalize(replaced=False)
             raise
         finally:
@@ -767,6 +775,7 @@ class SpellDaemon:
             # LLM crash, OOM, or any other unexpected error — release the pending
             # lock so the daemon can continue processing future sentences.
             diagnostics.record("rephrase", "error", "Rephrase pipeline failed.", str(exc))
+            _surface_cli_error(exc)
             self.buf.finalize(replaced=False)
             raise
         finally:
@@ -877,6 +886,10 @@ class SpellDaemon:
                 final_text = ""
             else:
                 diagnostics.record("rephrase", "info", "Selected text rephrase ignored.")
+        except CLIModelError as exc:
+            diagnostics.record("rephrase", "error", "Selected-text CLI request failed.", str(exc))
+            _surface_cli_error(exc)
+            raise
         finally:
             selected_text = ""
             corrected = ""
@@ -943,6 +956,11 @@ class SpellDaemon:
                 diagnostics.record("backend", "warning", "Cloud API key is missing.")
             if not self.cfg.get("cloud_model", "").strip():
                 diagnostics.record("backend", "warning", "Cloud model is not selected.")
+        elif mode == "cli":
+            if not self.cfg.get("cli_models_enabled", False):
+                diagnostics.record("backend", "warning", "Command-line models are switched off.")
+            if not self.cfg.get("cli_model", "").strip():
+                diagnostics.record("backend", "warning", "Command-line model is not selected.")
         elif mode == "local":
             path = self.cfg.get("model_path", "")
             if not path:
@@ -1018,6 +1036,23 @@ class SpellDaemon:
 
         def _settings():
             _open_settings(self.cfg, lambda c: self.cfg.update(c), load_model)
+
+        # AI CLI selection is detection-only and spends no subscription request.
+        if mode == "cli":
+            try:
+                backend = connect_cli(
+                    self.cfg.get("cli_model", ""),
+                    bool(self.cfg.get("cli_models_enabled", False)),
+                    self.cfg.get("cli_reasoning_effort", ""),
+                )
+                diagnostics.set_status(backend=backend)
+                return
+            except Exception as exc:
+                diagnostics.record("backend", "error", "AI CLI selection failed.", str(exc))
+                print(f"[Vedium] AI CLI selection failed: {exc}", file=sys.stderr)
+            # The selected CLI never falls back to another backend.
+            _settings()
+            return
 
         # 1. Cloud — only when explicitly selected (keeps the app offline-first).
         if mode == "cloud":

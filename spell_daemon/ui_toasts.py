@@ -9,6 +9,7 @@ from . import constants as c
 from .constants import BG, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _rephrase_history
 from .constants import DEFAULT_CFG
 from .llm import _stream_cancel, chat_with_text_stream, _streaming_answer, _clean_llm_output
+from .cli_models import CLIModelError
 
 # We need access to the same _UI_ROOT and _ui_call as settings.
 # _UI_ROOT is read via the module (ui_settings._UI_ROOT) because it is rebound
@@ -357,7 +358,9 @@ class _Toast:
                         chat_entry.delete(0, "end")
                         chat_entry.focus_set()
                     _ui_call(_done, wait=False)
-                except Exception:
+                except Exception as exc:
+                    if isinstance(exc, CLIModelError):
+                        _info_toast(f"AI CLI error: {exc}")
                     def _err():
                         _update_widget_text(self._original, _current[0])
                         chat_entry.config(state="normal")
@@ -824,7 +827,9 @@ class _EditableToast:
                         chat_entry.focus_set()
                     _ui_call(_done, wait=False)
 
-                except Exception:
+                except Exception as exc:
+                    if isinstance(exc, CLIModelError):
+                        _info_toast(f"AI CLI error: {exc}")
                     def _err():
                         if self._txt is not None:
                             self._txt.delete("1.0", "end")
