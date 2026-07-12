@@ -30,6 +30,11 @@ def _load_isolated_llm():
     package = types.ModuleType("spell_daemon")
     package.__path__ = [str(PACKAGE)]
     sys.modules["spell_daemon"] = package
+    # llm.py pulls in its sibling modules via normal imports; purge any copies
+    # cached by a previous call so every load starts from one fresh class set
+    # (a stale llm_backends would hold last load's CLIClient and _backend).
+    for sibling in ("llm_state", "llm_backends", "llm_postprocess"):
+        sys.modules.pop(f"spell_daemon.{sibling}", None)
 
     constants = types.ModuleType("spell_daemon.constants")
     constants._SLAVIC_LANGS = frozenset({"BHS"})
@@ -83,7 +88,7 @@ def _client(llm, reply="fixed", model="claude-haiku-4-5"):
 
 def test_connect_cli_is_detection_only_and_opt_in():
     llm, _events = _load_isolated_llm()
-    llm.selectable_models = lambda enabled: [{
+    llm.llm_backends.selectable_models = lambda enabled: [{
         "id": "claude-haiku", "label": "Claude Code - Haiku", "efforts": ["low"]
     }] if enabled else []
     llm._backend.client = object()

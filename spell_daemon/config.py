@@ -340,10 +340,10 @@ def load_cfg() -> dict:
     c.apply_font_size(cfg.get("font_size_offset", 0))
     _merge_custom_modes(cfg)
     
-    # We set _server_disable_thinking on the llm module namespace dynamically
+    # Apply the persisted thinking preference to the live backend state.
     try:
         from . import llm
-        llm._server_disable_thinking = bool(cfg.get("server_disable_thinking", True))
+        llm._backend.server_disable_thinking = bool(cfg.get("server_disable_thinking", True))
     except (ImportError, AttributeError):
         pass
     return cfg

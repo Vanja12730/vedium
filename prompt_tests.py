@@ -22,8 +22,12 @@ def _fake_backend(captured: list, events: list | None = None):
     (component, severity, message) tuples. Restores everything on exit."""
     import spell_daemon.llm as llm
 
+    # The llm layer spans sibling modules; diagnostics must be stubbed in each
+    # module that calls it, since every module binds its own name at import.
+    diag_hosts = (llm, llm.llm_backends, llm.llm_postprocess)
     orig = (llm._backend.client, llm._build_prompt, llm._complete_prompt,
-            llm._stream_prompt, llm._get_thinking_budget, llm.diagnostics)
+            llm._stream_prompt, llm._get_thinking_budget,
+            tuple(m.diagnostics for m in diag_hosts))
 
     def fake_build(fmt, system, user):
         captured.append((fmt, system, user))
@@ -38,16 +42,20 @@ def _fake_backend(captured: list, events: list | None = None):
     llm._complete_prompt = lambda *a, **k: {"choices": [{"text": "ok"}]}
     llm._stream_prompt = fake_stream
     llm._get_thinking_budget = lambda: 0
-    llm.diagnostics = types.SimpleNamespace(
+    fake_diag = types.SimpleNamespace(
         record=lambda comp, sev, msg, **k: events.append((comp, sev, msg)),
         record_throttled=lambda comp, sev, msg, **k: events.append((comp, sev, msg)),
         set_status=lambda **k: None,
     )
+    for m in diag_hosts:
+        m.diagnostics = fake_diag
     try:
         yield llm
     finally:
         (llm._backend.client, llm._build_prompt, llm._complete_prompt,
-         llm._stream_prompt, llm._get_thinking_budget, llm.diagnostics) = orig
+         llm._stream_prompt, llm._get_thinking_budget, orig_diags) = orig
+        for m, d in zip(diag_hosts, orig_diags):
+            m.diagnostics = d
 
 
 def test_diacritics_spell_check_uses_live_mode_prompt() -> None:
@@ -162,18 +170,23 @@ def _cloud_client_with_responses(make_response):
         return make_response(len(client.calls))
 
     client._request = fake_request
-    orig_flag, orig_diag = llm._reasoning_model_detected, llm.diagnostics
-    llm._reasoning_model_detected = False
-    llm.diagnostics = types.SimpleNamespace(
+    diag_hosts = (llm, llm.llm_backends, llm.llm_postprocess)
+    orig_flag = llm._backend.reasoning_detected
+    orig_diags = tuple(m.diagnostics for m in diag_hosts)
+    llm._backend.reasoning_detected = False
+    fake_diag = types.SimpleNamespace(
         record=lambda *a, **k: None,
         record_throttled=lambda *a, **k: None,
         set_status=lambda **k: None,
     )
+    for m in diag_hosts:
+        m.diagnostics = fake_diag
     try:
         yield client, llm
     finally:
-        llm._reasoning_model_detected = orig_flag
-        llm.diagnostics = orig_diag
+        llm._backend.reasoning_detected = orig_flag
+        for m, d in zip(diag_hosts, orig_diags):
+            m.diagnostics = d
 
 
 def test_cloud_hidden_reasoning_retry_nonstream() -> None:
@@ -193,7 +206,7 @@ def test_cloud_hidden_reasoning_retry_nonstream() -> None:
         assert out == {"choices": [{"text": "fixed"}]}
         assert len(client.calls) == 2
         assert client.calls[1]["max_tokens"] == 50 + llm._THINKING_BUDGET_AUTO
-        assert llm._reasoning_model_detected is True
+        assert llm._backend.reasoning_detected is True
 
 
 def test_cloud_hidden_reasoning_retry_stream() -> None:
@@ -218,7 +231,7 @@ def test_cloud_hidden_reasoning_retry_stream() -> None:
         assert [c["choices"][0]["text"] for c in chunks] == ["fix", "ed"]
         assert len(client.calls) == 2
         assert client.calls[1]["max_tokens"] == 50 + llm._THINKING_BUDGET_AUTO
-        assert llm._reasoning_model_detected is True
+        assert llm._backend.reasoning_detected is True
 
 
 def test_cloud_hidden_reasoning_retries_only_once() -> None:
@@ -260,7 +273,7 @@ def test_cloud_inline_thought_truncation_retries() -> None:
             out = client._call_messages([{"role": "user", "content": "hi"}], max_tokens=50)
             assert out["choices"][0]["text"].endswith("full answer")
             assert len(client.calls) == 2
-            assert llm._reasoning_model_detected is True
+            assert llm._backend.reasoning_detected is True
 
     # Negative: length-capped but no reasoning markers → plain model with a
     # small budget; keep the old behavior (no retry, text passed through).
@@ -273,7 +286,7 @@ def test_cloud_inline_thought_truncation_retries() -> None:
         out = client._call_messages([{"role": "user", "content": "hi"}], max_tokens=50)
         assert out == {"choices": [{"text": "just a plain truncated answ"}]}
         assert len(client.calls) == 1
-        assert llm._reasoning_model_detected is False
+        assert llm._backend.reasoning_detected is False
 
 
 def test_cloud_smoke_test_flags_but_never_retries() -> None:
@@ -290,7 +303,7 @@ def test_cloud_smoke_test_flags_but_never_retries() -> None:
                                     max_tokens=1, retry_on_empty=False)
         assert out == {"choices": [{"text": ""}]}
         assert len(client.calls) == 1
-        assert llm._reasoning_model_detected is True
+        assert llm._backend.reasoning_detected is True
 
 
 @contextlib.contextmanager
@@ -315,20 +328,26 @@ def _cloud_failover_env(dispatch):
             {"provider": "TestProv", "base_url": base, "model": "stable-model"},
         ],
     }
-    saved = (llm._backend.client, llm._backend.path, llm._backend.label, llm.diagnostics,
-             llm._CloudClient._request, llm._reasoning_model_detected)
+    diag_hosts = (llm, llm.llm_backends, llm.llm_postprocess)
+    saved = (llm._backend.client, llm._backend.path, llm._backend.label,
+             tuple(m.diagnostics for m in diag_hosts),
+             llm._CloudClient._request, llm._backend.reasoning_detected)
     llm._backend.client = llm._CloudClient(base, "key", "flaky-model")
     llm._CloudClient._request = fake_request
-    llm.diagnostics = types.SimpleNamespace(
+    fake_diag = types.SimpleNamespace(
         record=lambda *a, **k: None,
         record_throttled=lambda *a, **k: None,
         set_status=lambda **k: None,
     )
+    for m in diag_hosts:
+        m.diagnostics = fake_diag
     try:
         yield llm, cfg, calls
     finally:
-        (llm._backend.client, llm._backend.path, llm._backend.label, llm.diagnostics,
-         llm._CloudClient._request, llm._reasoning_model_detected) = saved
+        (llm._backend.client, llm._backend.path, llm._backend.label, orig_diags,
+         llm._CloudClient._request, llm._backend.reasoning_detected) = saved
+        for m, d in zip(diag_hosts, orig_diags):
+            m.diagnostics = d
 
 
 def _http_error(code: int, body: dict):

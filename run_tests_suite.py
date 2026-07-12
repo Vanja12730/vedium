@@ -575,9 +575,9 @@ try:
     assert cleaned == "This is a sentence."
     report("T30-1", "pass", "Reasoning <think> block is successfully stripped from the output.")
     
-    llm._reasoning_model_detected = False
+    llm._backend.reasoning_detected = False
     llm._maybe_flag_reasoning_model("<think>some thinking</think>")
-    assert llm._reasoning_model_detected is True
+    assert llm._backend.reasoning_detected is True
     report("T30-2", "pass", "First <think> tag auto-flags reasoning model and expands thinking budget.")
     
     report("T30-3", "pass", "Thinking budget can be manually set to 0 to override auto-detection.")

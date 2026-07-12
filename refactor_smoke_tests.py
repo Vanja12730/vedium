@@ -19,6 +19,14 @@ def _settings_ui_source() -> str:
     return "\n".join(p.read_text(encoding="utf-8") for p in _settings_ui_files())
 
 
+def _llm_layer_source() -> str:
+    """Every source file of the LLM layer (facade + state/backends/postprocess)."""
+    return "\n".join(
+        (PACKAGE / name).read_text(encoding="utf-8")
+        for name in ("llm.py", "llm_state.py", "llm_backends.py", "llm_postprocess.py")
+    )
+
+
 def test_no_launcher_uses_old_monolith() -> None:
     run_vbs = (ROOT / "run.vbs").read_text(encoding="utf-8")
     installer = (ROOT / "Vedium.iss").read_text(encoding="utf-8")
@@ -51,7 +59,7 @@ def test_settings_split_globals_are_wired_to_modules() -> None:
     source = _settings_ui_source()
     assert "_FACTORY_PROMPTS" in imported_from_constants
     assert "_refresh_setup_status" not in source
-    assert "llm._server_disable_thinking = bool(nothink_var.get())" in source
+    assert "llm._backend.server_disable_thinking = bool(nothink_var.get())" in source
 
 
 def test_settings_uses_lightweight_ttk_theme() -> None:
@@ -70,7 +78,7 @@ def test_settings_spell_mode_labels_are_valid_unicode() -> None:
 
 
 def test_backend_unavailable_message_exists() -> None:
-    source = (PACKAGE / "llm.py").read_text(encoding="utf-8")
+    source = _llm_layer_source()
     assert "def _backend_unavailable_message" in source
 
 
@@ -81,7 +89,7 @@ def test_cloud_test_connect_updates_live_config() -> None:
 
 
 def test_cloud_quota_fallback_is_shared_across_generation_paths() -> None:
-    llm_source = (PACKAGE / "llm.py").read_text(encoding="utf-8")
+    llm_source = _llm_layer_source()
     daemon_source = (PACKAGE / "daemon.py").read_text(encoding="utf-8")
     toasts_source = (PACKAGE / "ui_toasts.py").read_text(encoding="utf-8")
 

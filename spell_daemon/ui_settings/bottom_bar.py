@@ -118,7 +118,7 @@ def _build_bottom_bar(ui):
         cfg["auto_detect_server"]     = autodetect_var.get()
         cfg["server_disable_thinking"] = nothink_var.get()
         # Apply live so the change takes effect without reconnecting the server.
-        llm._server_disable_thinking = bool(nothink_var.get())
+        llm._backend.server_disable_thinking = bool(nothink_var.get())
         cfg["prompt_format"]          = fmt_var.get()
         cfg["gpu_acceleration"]       = gpu_var.get()
         cfg["working_language"]       = lang_var.get()

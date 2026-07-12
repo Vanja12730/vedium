@@ -19,6 +19,9 @@ from spell_daemon import buffer
 from spell_daemon import ui_thread
 from spell_daemon import ui_widgets
 from spell_daemon import replacement
+from spell_daemon import llm_state
+from spell_daemon import llm_postprocess
+from spell_daemon import llm_backends
 from spell_daemon import llm
 from spell_daemon import ui_settings
 from spell_daemon import ui_chat
