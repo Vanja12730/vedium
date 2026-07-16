@@ -4,6 +4,9 @@ __pycache__/
 
 # Installer build output
 Output/
+# Portable Python bundle + download cache (rebuild: py -3.12 make_python_bundle.py)
+python_embed/
+build_cache/
 
 # Live user config (regenerated from DEFAULT_CFG on first run)
 vedium_config.json

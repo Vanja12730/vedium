@@ -2,41 +2,53 @@
 ;  Vedium.iss  —  Inno Setup 6 installer script
 ;
 ;  Produces a single Setup.exe that:
-;    1. Checks Python is installed and on PATH
-;    2. Checks pip is available
-;    3. Installs / upgrades llama-cpp-python (CPU or GPU build, user's choice)
-;    4. Installs pystray, pillow, pynput via pip (with user confirmation)
-;    5. Copies the refactored spell_daemon package + run.vbs to the install folder
-;    6. Optionally downloads the recommended Gemma 3 GGUF model into the
+;    1. Copies the spell_daemon package, run.vbs and a PRIVATE portable
+;       Python 3.12 (with tkinter, pip, pystray, pillow, pynput pre-installed)
+;       to the install folder — the user's own Python, if any, is never
+;       touched or even looked at
+;    2. Installs llama-cpp-python into that private Python (CPU or GPU build,
+;       user's choice; CPU wheel picked to match the machine's AVX support)
+;    3. Optionally downloads the recommended Gemma 3 GGUF model into the
 ;       install folder (with a live progress bar) and pre-selects it in config
-;    7. Creates a Desktop shortcut that launches run.vbs
-;    8. Registers the app in Add/Remove Programs with a clean uninstaller
+;    4. Creates a Desktop shortcut that launches run.vbs
+;    5. Registers the app in Add/Remove Programs with a clean uninstaller
 ;
 ;  HOW TO BUILD
 ;  ────────────
 ;    1. Download and install Inno Setup 6 from https://jrsoftware.org/isinfo.php
-;    2. Place this file in the same folder as the spell_daemon package and run.vbs
+;    2. Build the portable Python bundle (once, and after dependency changes):
+;         py -3.12 make_python_bundle.py
 ;    3. Right-click Vedium.iss → Compile  (or open in Inno Setup IDE)
-;    4. The finished installer appears as Output\VediumSetup.exe
+;    4. The finished installer appears as Output\VediumSetup_v<AppVersion>.exe
 ;
 ; ─────────────────────────────────────────────────────────────────────────────
 
+; Refuse to compile without the portable Python bundle — an installer built
+; without it would install a broken app.
+#if !FileExists("python_embed\python.exe")
+  #error Portable Python bundle missing - run:  py -3.12 make_python_bundle.py
+#endif
+
 #define AppName      "Vedium"
 #define AppVersion   "1.2"
-#define AppPublisher "Your Name"
+#define AppPublisher "The Ved Project"
 #define AppExeName   "run.vbs"
 
 [Setup]
-AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
+; Unique app identity for Windows (Add/Remove Programs, upgrade detection).
+; NEVER change this once released — a new AppId makes Windows treat the next
+; version as a different application and orphans existing installs.
+AppId={{0AB6BC53-F06E-4176-8D02-A14FB363A564}
 AppName={#AppName}
 AppVersion={#AppVersion}
+; Point these at the repo once it lives under the ved-project GitHub org
 AppPublisherURL=
 AppSupportURL=
 AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\{#AppName}
 DisableProgramGroupPage=yes
 OutputDir=Output
-OutputBaseFilename=VediumSetup_v1.2
+OutputBaseFilename=VediumSetup_v{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -67,8 +79,22 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 ; Core application files — copied to the install directory
 Source: "spell_daemon\*"; DestDir: "{app}\spell_daemon"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "run.vbs";         DestDir: "{app}"; Flags: ignoreversion
+; Private portable Python 3.12 — built by make_python_bundle.py. run.vbs
+; prefers {app}\python\pythonw.exe, so the app always runs on this exact
+; interpreter regardless of what Python (if any) the user has installed.
+Source: "python_embed\*"; DestDir: "{app}\python"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; App icon — generate once before building: python make_ico.py
 Source: "{#SourcePath}app.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; Wipe the bundled Python before copying the fresh one.  Inno Setup overwrites
+; files it ships but never removes ones it doesn't, so without this, upgrading
+; would leave obsolete package versions' files piling up in Lib\site-packages.
+; Cost: the AI engine (llama-cpp-python) lives there too, so a reinstall asks
+; for the CPU/GPU choice again and re-downloads that wheel.
+; The user's config and downloaded models live in {app} itself, NOT here, and
+; are preserved across reinstalls.
+Type: filesandordirs; Name: "{app}\python"
 
 [Icons]
 ; Desktop shortcut — wscript.exe runs run.vbs silently (no console window)
@@ -81,11 +107,14 @@ Name: "{userdesktop}\{#AppName}";  \
 
 [Code]
 // ─────────────────────────────────────────────────────────────────────────────
-//  Pascal script — runs checks and pip installs during the install wizard.
-//  Inno Setup's [Code] section uses a subset of Object Pascal.
+//  Pascal script — provisions the AI engine and offers the model download,
+//  all in the post-install step.  Inno Setup's [Code] section uses a subset
+//  of Object Pascal.
 //
-//  We locate python.exe by its full path rather than relying on PATH
-//  inheritance, which is unreliable when Inno Setup spawns child processes.
+//  Every python/pip call uses the full path to the PRIVATE portable Python
+//  copied to {app}\python by [Files] — the user's own Python and PATH are
+//  never consulted, so venvs, Store stubs, or a missing Python cannot break
+//  the install.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Recommended local model — Gemma 3 4B instruct, Q4_K_M quant (~2.49 GB).
@@ -98,21 +127,15 @@ const
     'https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/' +
     'gemma-3-4b-it-Q4_K_M.gguf';
 
-  // Portable Python 3.12 embeddable — downloaded only when no system Python is found.
-  // 3.12 is chosen to match the GPU wheel (cp312) so CPU and GPU paths both work.
-  PYTHON_EMBED_URL = 'https://www.python.org/ftp/python/3.12.9/python-3.12.9-embed-amd64.zip';
-  PYTHON_EMBED_ZIP = 'python-3.12.9-embed-amd64.zip';
-  GET_PIP_URL      = 'https://bootstrap.pypa.io/get-pip.py';
-
 var
-  GPythonExe:        String;  // full path to python.exe, set by FindPython()
-  GInstalledSummary: String;  // running log of already-present packages/features;
+  GPythonExe:        String;  // full path to the bundled {app}\python\python.exe
+  GInstalledSummary: String;  // running log of installed packages/features;
                                // shown in the final completion dialog
   GAVX512Supported:  Boolean; // True if the CPU supports AVX-512; set by DetectAVX512()
+  GCudaOK:           Boolean; // True if an NVIDIA driver supporting CUDA >= 12.8
+                               // is present; set by DetectNvidiaCuda()
   GModelDownloaded:  Boolean; // True if the Gemma 3 model was downloaded into {app}
   GModelPath:        String;  // full path to the downloaded .gguf (if any)
-  GUsingEmbedded:    Boolean; // True when portable Python was downloaded by the installer
-  GEmbedDir:         String;  // staging dir for embedded Python ({tmp}\python_embed)
 
 
 // ── Detect AVX-512 CPU support ────────────────────────────────────────────────
@@ -148,191 +171,72 @@ begin
 end;
 
 
-// ── Locate python.exe ────────────────────────────────────────────────────────
-// Tries 'where python' first (respects PATH), then falls back to the standard
-// per-user and system install locations for Python 3.10 through 3.13.
-function FindPython(): String;
+// ── Detect an NVIDIA GPU with a CUDA 12.8-capable driver ────────────────────
+// nvidia-smi ships with every NVIDIA driver.  Depending on driver generation
+// its banner line reads either
+//   | NVIDIA-SMI 570.86  Driver Version: 570.86   CUDA Version: 12.8     |
+// or (newer drivers)
+//   | NVIDIA-SMI 610.62  KMD Version: 610.62      CUDA UMD Version: 13.3 |
+// so the parse anchors on 'CUDA' and takes the number after the following
+// 'Version:'.  That number is the highest CUDA the DRIVER supports; drivers
+// are backward compatible, so >= 12.8 can run the prebuilt CUDA 12.8 wheel.
+// If nvidia-smi is missing (no NVIDIA driver) or reports < 12.8, GCudaOK
+// stays False and the dialog recommends the CPU build instead.
+procedure DetectNvidiaCuda();
 var
   TmpFile: String;
-  Lines: TArrayOfString;
-  ResultCode, I: Integer;
-  Candidate: String;
-  Searches: TArrayOfString;
+  Lines:   TArrayOfString;
+  Code, I, P, DotPos: Integer;
+  S, Ver:  String;
+  Major, Minor: Integer;
 begin
-  Result := '';
+  GCudaOK := False;
 
-  // ── Strategy 1: ask Windows where python is ───────────────────────────────
-  TmpFile := ExpandConstant('{tmp}\ga_where.txt');
-  Exec('cmd.exe', '/c where python > "' + TmpFile + '" 2>&1',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if ResultCode = 0 then
+  TmpFile := ExpandConstant('{tmp}\ga_nvsmi.txt');
+  Exec('cmd.exe', '/c nvidia-smi > "' + TmpFile + '" 2>&1',
+       '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if Code <> 0 then Exit;
+
+  if not LoadStringsFromFile(TmpFile, Lines) then Exit;
+  for I := 0 to GetArrayLength(Lines) - 1 do
   begin
-    if LoadStringsFromFile(TmpFile, Lines) then
-      for I := 0 to GetArrayLength(Lines) - 1 do
-      begin
-        Candidate := Trim(Lines[I]);
-        if (Candidate <> '') and FileExists(Candidate) then
-        begin
-          Result := Candidate;
-          Exit;
-        end;
-      end;
-  end;
-
-  // ── Strategy 2: check well-known install paths ────────────────────────────
-  SetArrayLength(Searches, 16);
-  Searches[0]  := ExpandConstant('{localappdata}') + '\Programs\Python\Python313\python.exe';
-  Searches[1]  := ExpandConstant('{localappdata}') + '\Programs\Python\Python312\python.exe';
-  Searches[2]  := ExpandConstant('{localappdata}') + '\Programs\Python\Python311\python.exe';
-  Searches[3]  := ExpandConstant('{localappdata}') + '\Programs\Python\Python310\python.exe';
-  Searches[4]  := 'C:\Python313\python.exe';
-  Searches[5]  := 'C:\Python312\python.exe';
-  Searches[6]  := 'C:\Python311\python.exe';
-  Searches[7]  := 'C:\Python310\python.exe';
-  Searches[8]  := ExpandConstant('{pf}') + '\Python313\python.exe';
-  Searches[9]  := ExpandConstant('{pf}') + '\Python312\python.exe';
-  Searches[10] := ExpandConstant('{pf}') + '\Python311\python.exe';
-  Searches[11] := ExpandConstant('{pf}') + '\Python310\python.exe';
-  Searches[12] := ExpandConstant('{pf32}') + '\Python313\python.exe';
-  Searches[13] := ExpandConstant('{pf32}') + '\Python312\python.exe';
-  Searches[14] := ExpandConstant('{pf32}') + '\Python311\python.exe';
-  Searches[15] := ExpandConstant('{pf32}') + '\Python310\python.exe';
-
-  for I := 0 to GetArrayLength(Searches) - 1 do
-    if FileExists(Searches[I]) then
+    S := Lines[I];
+    P := Pos('CUDA', S);
+    if P = 0 then Continue;
+    S := Copy(S, P, Length(S));            // 'CUDA [UMD ]Version: NN.N ... |'
+    P := Pos('Version:', S);
+    if P = 0 then Continue;
+    Ver := Trim(Copy(S, P + Length('Version:'), 8));
+    P := Pos(' ', Ver);
+    if P > 0 then Ver := Copy(Ver, 1, P - 1);
+    P := Pos('|', Ver);
+    if P > 0 then Ver := Copy(Ver, 1, P - 1);
+    DotPos := Pos('.', Ver);
+    if DotPos > 0 then
     begin
-      Result := Searches[I];
-      Exit;
+      Major := StrToIntDef(Copy(Ver, 1, DotPos - 1), 0);
+      Minor := StrToIntDef(Copy(Ver, DotPos + 1, 3), -1);
+      GCudaOK := (Major > 12) or ((Major = 12) and (Minor >= 8));
     end;
+    Exit;
+  end;
 end;
 
 
-// ── Download and set up a portable Python ────────────────────────────────────
-// Called when no system Python is found.  Downloads the embeddable package,
-// extracts it, enables site-packages, and bootstraps pip — all automatically.
-// On success sets GPythonExe and GUsingEmbedded; returns True.
-function SetupEmbeddedPython(): Boolean;
-var
-  ZipFile, PipFile, PthFile: String;
-  Code: Integer;
-  Form: TForm;
-  Lbl: TLabel;
+// ── Create a word-wrapping description label ─────────────────────────────────
+// TNewStaticText (unlike plain TLabel) keeps the width it is given and grows
+// in HEIGHT only, so wrapped text never collapses into a narrow column.
+function CreateWrappedText(AParent: TForm; ALeft, ATop, AWidth: Integer;
+                           const ACaption: String): TNewStaticText;
 begin
-  Result := False;
-  GEmbedDir := ExpandConstant('{tmp}\python_embed');
-  ZipFile   := ExpandConstant('{tmp}\') + PYTHON_EMBED_ZIP;
-  PipFile   := ExpandConstant('{tmp}\get-pip.py');
-
-  Form := TForm.Create(nil);
-  try
-    Form.Caption      := 'Vedium — Setting up Python';
-    Form.ClientWidth  := ScaleX(460);
-    Form.ClientHeight := ScaleY(60);
-    Form.Position     := poScreenCenter;
-    Form.BorderStyle  := bsDialog;
-
-    Lbl := TLabel.Create(Form);
-    Lbl.Parent   := Form;
-    Lbl.Left     := ScaleX(16);
-    Lbl.Top      := ScaleY(20);
-    Lbl.Width    := Form.ClientWidth - ScaleX(32);
-    Lbl.AutoSize := False;
-    Lbl.Caption  := 'Downloading portable Python 3.12...';
-    Form.Show;
-    Form.Refresh;
-
-    // Step 1: Download the embeddable zip (~11 MB)
-    Exec('powershell.exe',
-         '-ExecutionPolicy Bypass -NoProfile -Command "' +
-         '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; ' +
-         'Invoke-WebRequest -Uri ''''' + PYTHON_EMBED_URL + ''''' -OutFile ''''' + ZipFile + '''''"',
-         '', SW_HIDE, ewWaitUntilTerminated, Code);
-
-    if (Code <> 0) or not FileExists(ZipFile) then
-    begin
-      MsgBox(
-        'Could not download portable Python.' + #13#10 + #13#10 +
-        'Please check your internet connection and try again,' + #13#10 +
-        'or install Python manually from https://www.python.org/downloads/',
-        mbError, MB_OK);
-      Exit;
-    end;
-
-    // Step 2: Extract
-    Lbl.Caption := 'Extracting Python...';
-    Form.Refresh;
-
-    ForceDirectories(GEmbedDir);
-    Exec('powershell.exe',
-         '-ExecutionPolicy Bypass -NoProfile -Command "' +
-         'Expand-Archive -Path ''''' + ZipFile + ''''' -DestinationPath ''''' + GEmbedDir + ''''' -Force"',
-         '', SW_HIDE, ewWaitUntilTerminated, Code);
-
-    if (Code <> 0) or not FileExists(GEmbedDir + '\python.exe') then
-    begin
-      MsgBox('Could not extract portable Python. Setup cannot continue.',
-             mbError, MB_OK);
-      Exit;
-    end;
-
-    // Step 3: Enable site-packages — the embeddable ships with
-    // '#import site' commented out in python312._pth; rewrite it enabled.
-    Lbl.Caption := 'Configuring Python...';
-    Form.Refresh;
-
-    PthFile := GEmbedDir + '\python312._pth';
-    if FileExists(PthFile) then
-    begin
-      DeleteFile(PthFile);
-      SaveStringToFile(PthFile,
-        'python312.zip' + #13#10 +
-        '.' + #13#10 +
-        'Lib\site-packages' + #13#10 +
-        'import site' + #13#10, False);
-    end;
-
-    // Step 4: Download get-pip.py
-    Lbl.Caption := 'Downloading pip...';
-    Form.Refresh;
-
-    Exec('powershell.exe',
-         '-ExecutionPolicy Bypass -NoProfile -Command "' +
-         '[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; ' +
-         'Invoke-WebRequest -Uri ''''' + GET_PIP_URL + ''''' -OutFile ''''' + PipFile + '''''"',
-         '', SW_HIDE, ewWaitUntilTerminated, Code);
-
-    if (Code <> 0) or not FileExists(PipFile) then
-    begin
-      MsgBox('Could not download pip. Setup cannot continue.', mbError, MB_OK);
-      Exit;
-    end;
-
-    // Step 5: Bootstrap pip into the portable Python
-    Lbl.Caption := 'Installing pip...';
-    Form.Refresh;
-
-    Exec(GEmbedDir + '\python.exe',
-         '"' + PipFile + '" --no-warn-script-location',
-         '', SW_HIDE, ewWaitUntilTerminated, Code);
-
-    if Code <> 0 then
-    begin
-      MsgBox('Could not install pip into portable Python.', mbError, MB_OK);
-      Exit;
-    end;
-
-    // Done — point all subsequent pip installs at this Python.
-    GPythonExe     := GEmbedDir + '\python.exe';
-    GUsingEmbedded := True;
-    Result         := True;
-
-    Lbl.Caption := 'Portable Python is ready.';
-    Form.Refresh;
-    Sleep(600);
-
-  finally
-    Form.Free;
-  end;
+  Result := TNewStaticText.Create(AParent);
+  Result.Parent   := AParent;
+  Result.Left     := ALeft;
+  Result.Top      := ATop;
+  Result.Width    := AWidth;
+  Result.WordWrap := True;
+  Result.AutoSize := True;
+  Result.Caption  := ACaption;
 end;
 
 
@@ -344,31 +248,6 @@ var
 begin
   Exec(GPythonExe, Args, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := (ResultCode = 0);
-end;
-
-
-// ── CHECK 1: Python ──────────────────────────────────────────────────────────
-// Returns True if a system Python was found; False triggers the embedded
-// Python download in PrepareToInstall (no user-facing error shown here).
-function CheckPython(): Boolean;
-begin
-  GPythonExe := FindPython();
-  Result := (GPythonExe <> '') and FileExists(GPythonExe);
-end;
-
-
-// ── CHECK 2: pip ─────────────────────────────────────────────────────────────
-function CheckPip(): Boolean;
-begin
-  Result := PyRun('-m pip --version');
-  if not Result then
-    MsgBox(
-      'pip was not found.' + #13#10 + #13#10 +
-      'pip is normally included with Python. To restore it, open' + #13#10 +
-      'a Command Prompt and run:' + #13#10 + #13#10 +
-      '  python -m ensurepip --upgrade' + #13#10 + #13#10 +
-      'Then run this installer again.',
-      mbError, MB_OK);
 end;
 
 
@@ -472,8 +351,8 @@ begin
       MsgBox(
         'The following packages could not be installed:' + #13#10 + #13#10 +
         Failed + #13#10 +
-        'You can retry manually in a Command Prompt:' + #13#10 +
-        '  pip install ' + Failed,
+        'You can retry manually in a Command Prompt with:' + #13#10 +
+        '  "' + GPythonExe + '" -m pip install <package>',
         mbError, MB_OK);
 
   finally
@@ -482,21 +361,21 @@ begin
 end;
 
 
-// ── CHECK 3: llama-cpp-python ────────────────────────────────────────────────
+// ── AI engine: llama-cpp-python ──────────────────────────────────────────────
 // Radio-button dialog lets the user choose CPU (latest) or GPU (v0.3.16).
-// If already installed, shows the current version and offers to upgrade.
-// CPU path: upgrades via the official abetlen CPU wheel index.
+// The pre-selected/recommended option follows hardware detection: GPU when an
+// NVIDIA driver supporting CUDA 12.8 is present (GCudaOK), CPU otherwise.
+// The engine is never pre-installed when this runs: [InstallDelete] wipes
+// {app}\python before every install, so there is no upgrade path to handle.
+// CPU path: installs via the official abetlen CPU wheel index.
 // GPU path: downloads the 226 MB community CUDA 12.8 wheel via urllib then pip.
 procedure CheckLlamaCpp();
 var
-  AlreadyInstalled: Boolean;
-  CurrentVer:       String;
-  TmpVerFile:       String;
-  Lines:            TArrayOfString;
   Form:             TForm;
-  Lbl:              TLabel;
-  LblCPU:           TLabel;
-  LblGPU:           TLabel;
+  Intro:            TNewStaticText;
+  LblCPU:           TNewStaticText;
+  LblGPU:           TNewStaticText;
+  LblSkip:          TNewStaticText;
   RbCPU:            TRadioButton;
   RbGPU:            TRadioButton;
   RbSkip:           TRadioButton;
@@ -504,34 +383,24 @@ var
   Margin:           Integer;
   ContentW:         Integer;
   Y, Code:          Integer;
+  IntroText:        String;
+  GpuText:          String;
+  PipSpec:          String;
   PkgArray:         TArrayOfString;
   WheelUrl:         String;
   WheelFile:        String;
-  DownloadArgs:     String;
+  DlFile:           String;
+  DlScript:         String;
 begin
-  // ── Detect current state ──────────────────────────────────────────────────
-  AlreadyInstalled := PyRun('-c "import llama_cpp"');
-  CurrentVer := '';
-  if AlreadyInstalled then
-  begin
-    TmpVerFile := ExpandConstant('{tmp}\llama_ver.txt');
-    Exec('cmd.exe',
-         '/c "' + GPythonExe + '" -c "import llama_cpp; print(llama_cpp.__version__)" > "' +
-         TmpVerFile + '" 2>&1',
-         '', SW_HIDE, ewWaitUntilTerminated, Code);
-    if LoadStringsFromFile(TmpVerFile, Lines) and (GetArrayLength(Lines) > 0) then
-      CurrentVer := Trim(Lines[0]);
-  end;
-
   // ── Build choice dialog ───────────────────────────────────────────────────
   // All coordinates are wrapped in ScaleX/ScaleY so the layout grows with the
   // dialog font on high-DPI displays.  Radio buttons cannot word-wrap, so each
-  // option has a SHORT one-line radio caption plus a separate auto-sizing,
-  // word-wrapped description label beneath it.
+  // option has a SHORT one-line radio caption plus a separate word-wrapped
+  // description beneath it (TNewStaticText — see CreateWrappedText).
   Form := TForm.Create(nil);
   try
     Form.Caption     := 'Vedium — AI Engine';
-    Form.ClientWidth := ScaleX(600);
+    Form.ClientWidth := ScaleX(620);
     Form.Position    := poScreenCenter;
     Form.BorderStyle := bsDialog;
 
@@ -539,24 +408,15 @@ begin
     ContentW := Form.ClientWidth - (Margin * 2);
     Y        := ScaleY(16);
 
-    // ── Intro paragraph (auto-height wrapped label) ──────────────────────────
-    Lbl := TLabel.Create(Form);
-    Lbl.Parent   := Form;
-    Lbl.Left     := Margin;
-    Lbl.Top      := Y;
-    Lbl.Width    := ContentW;
-    Lbl.WordWrap := True;
-    Lbl.AutoSize := True;
-    if AlreadyInstalled then
-      Lbl.Caption :=
-        'llama-cpp-python ' + CurrentVer + ' is already installed. Upgrading to the ' +
-        'latest CPU build is recommended — it fixes a known GPU-fallback error ' +
-        '(AttributeError: sampler) on machines without a compatible NVIDIA GPU.'
-    else
-      Lbl.Caption :=
-        'llama-cpp-python is the engine that runs the local AI model. ' +
-        'It is not installed yet. Please choose a build:';
-    Y := Lbl.Top + Lbl.Height + ScaleY(14);
+    // ── Intro paragraph ──────────────────────────────────────────────────────
+    IntroText :=
+      'llama-cpp-python is the engine that runs AI models locally on this ' +
+      'computer. It is not installed yet.' + #13#10 + #13#10 +
+      'Planning to use a cloud AI service (API key) or a CLI backend instead ' +
+      'of a local model? Then no engine and no powerful hardware are needed — ' +
+      'choose Skip.';
+    Intro := CreateWrappedText(Form, Margin, Y, ContentW, IntroText);
+    Y := Intro.Top + Intro.Height + ScaleY(16);
 
     // ── CPU option ───────────────────────────────────────────────────────────
     RbCPU := TRadioButton.Create(Form);
@@ -566,27 +426,23 @@ begin
     RbCPU.Width   := ContentW;
     RbCPU.Height  := ScaleY(20);
     if GAVX512Supported then
-      RbCPU.Caption := 'CPU build — latest (AVX-512)     [recommended]'
+      RbCPU.Caption := 'CPU build — latest (AVX-512)'
     else
-      RbCPU.Caption := 'CPU build — v0.3.19 (AVX2 compatible)     [recommended]';
-    RbCPU.Checked := True;
+      RbCPU.Caption := 'CPU build — v0.3.19 (AVX2 compatible)';
+    if not GCudaOK then
+      RbCPU.Caption := RbCPU.Caption + '     [recommended for this PC]';
+    RbCPU.Checked := not GCudaOK;
     Y := RbCPU.Top + RbCPU.Height + ScaleY(2);
 
-    LblCPU := TLabel.Create(Form);
-    LblCPU.Parent   := Form;
-    LblCPU.Left     := Margin + ScaleX(22);
-    LblCPU.Top      := Y;
-    LblCPU.Width    := ContentW - ScaleX(22);
-    LblCPU.WordWrap := True;
-    LblCPU.AutoSize := True;
     if GAVX512Supported then
-      LblCPU.Caption :=
-        'Installs the newest version. Supports Gemma 3, Qwen3, and most models. ' +
-        'AVX-512 detected — full feature set available.'
+      LblCPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
+        'Runs the model on the processor — works on any PC. Installs the newest ' +
+        'version (AVX-512 detected). Supports Gemma 3, Qwen3, and most models.')
     else
-      LblCPU.Caption :=
-        'Your CPU supports AVX2 but not AVX-512. This build runs stably on your ' +
-        'hardware. Supports Qwen3 and most models; GPU offload still works.';
+      LblCPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
+        'Runs the model on the processor — works on any PC. Your CPU supports ' +
+        'AVX2 but not AVX-512, so the stable v0.3.19 build is used. Supports ' +
+        'Qwen3 and most models.');
     Y := LblCPU.Top + LblCPU.Height + ScaleY(14);
 
     // ── GPU option ───────────────────────────────────────────────────────────
@@ -596,20 +452,24 @@ begin
     RbGPU.Top     := Y;
     RbGPU.Width   := ContentW;
     RbGPU.Height  := ScaleY(20);
-    RbGPU.Caption := 'GPU build — v0.3.16 (NVIDIA only)';
+    RbGPU.Caption := 'GPU build — v0.3.16 (NVIDIA)';
+    if GCudaOK then
+      RbGPU.Caption := RbGPU.Caption + '     [recommended for this PC]';
+    RbGPU.Checked := GCudaOK;
     Y := RbGPU.Top + RbGPU.Height + ScaleY(2);
 
-    LblGPU := TLabel.Create(Form);
-    LblGPU.Parent   := Form;
-    LblGPU.Left     := Margin + ScaleX(22);
-    LblGPU.Top      := Y;
-    LblGPU.Width    := ContentW - ScaleX(22);
-    LblGPU.WordWrap := True;
-    LblGPU.AutoSize := True;
-    LblGPU.Caption  :=
-      'Requires an NVIDIA GPU + CUDA 12.8. Faster inference. Supports Qwen3 and ' +
-      'Gemma 3. Requires Python 3.12. Downloads a 226 MB wheel — a console window ' +
-      'will show progress.';
+    if GCudaOK then
+      GpuText :=
+        'An NVIDIA GPU with a CUDA 12.8-capable driver was detected on this PC ' +
+        '— this is the fastest option for you. Supports Gemma 3 and Qwen3. ' +
+        'Downloads a 226 MB wheel; a console window will show progress.'
+    else
+      GpuText :=
+        'Requires an NVIDIA GPU with a CUDA 12.8-capable driver — none was ' +
+        'detected on this PC. Supports Gemma 3 and Qwen3. Downloads a 226 MB ' +
+        'wheel; a console window will show progress.';
+    LblGPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
+                                GpuText);
     Y := LblGPU.Top + LblGPU.Height + ScaleY(14);
 
     // ── Skip option ──────────────────────────────────────────────────────────
@@ -619,8 +479,13 @@ begin
     RbSkip.Top     := Y;
     RbSkip.Width   := ContentW;
     RbSkip.Height  := ScaleY(20);
-    RbSkip.Caption := 'Skip — I will install / update manually later';
-    Y := RbSkip.Top + RbSkip.Height + ScaleY(18);
+    RbSkip.Caption := 'Skip — cloud / CLI mode, or install the engine later';
+    Y := RbSkip.Top + RbSkip.Height + ScaleY(2);
+
+    LblSkip := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
+      'Vedium works without a local engine when a cloud API key or a CLI ' +
+      'backend is set up in Settings. You can add the local engine any time.');
+    Y := LblSkip.Top + LblSkip.Height + ScaleY(18);
 
     // ── Continue button (centred) ────────────────────────────────────────────
     BtnOK := TNewButton.Create(Form);
@@ -683,11 +548,23 @@ begin
         'Click OK to begin.',
         mbInformation, MB_OK);
 
-      DownloadArgs := '-c "import urllib.request; ' +
-                     'print(chr(68)+chr(111)+chr(119)+chr(110)+chr(108)+chr(111)+chr(97)+chr(100)+chr(105)+chr(110)+chr(103)+chr(46)+chr(46)+chr(46)); ' +
-                     'urllib.request.urlretrieve(r""' + WheelUrl + '"", r""' + WheelFile + '"")"';
+      // Run the download from a temp script rather than a -c one-liner —
+      // string literals inside a quoted -c argument need escaping that cmd,
+      // Inno and Python all disagree about.
+      DlFile   := ExpandConstant('{tmp}\ga_wheel_dl.py');
+      DlScript :=
+        'import urllib.request' + #13#10 +
+        'print("Downloading the GPU wheel (~226 MB)...")' + #13#10 +
+        'urllib.request.urlretrieve(r"' + WheelUrl + '", r"' + WheelFile + '")' + #13#10;
 
-      Exec(GPythonExe, DownloadArgs, '', SW_SHOW, ewWaitUntilTerminated, Code);
+      if not SaveStringToFile(DlFile, DlScript, False) then
+      begin
+        MsgBox('Could not create the download helper. Skipping the engine install.',
+               mbError, MB_OK);
+        Exit;
+      end;
+
+      Exec(GPythonExe, '"' + DlFile + '"', '', SW_SHOW, ewWaitUntilTerminated, Code);
 
       if (Code <> 0) or not FileExists(WheelFile) then
       begin
@@ -698,9 +575,6 @@ begin
           mbError, MB_OK);
         Exit;
       end;
-
-      if AlreadyInstalled then
-        PyRun('-m pip uninstall llama-cpp-python -y');
 
       SetArrayLength(PkgArray, 1);
       PkgArray[0] := WheelFile;
@@ -714,23 +588,19 @@ begin
     else
     begin
       if GAVX512Supported then
-        MsgBox(
-          'Skipped. The grammar engine will not work until llama-cpp-python is installed.' + #13#10 + #13#10 +
-          'Your CPU supports AVX-512. Install the latest build any time:' + #13#10 +
-          '  pip install --upgrade --only-binary llama-cpp-python' + #13#10 +
-          '      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu' + #13#10 +
-          '      llama-cpp-python' + #13#10 + #13#10 +
-          'GPU build (NVIDIA + CUDA 12.8 only): see the GPU install guide.',
-          mbInformation, MB_OK)
+        PipSpec := 'llama-cpp-python'
       else
-        MsgBox(
-          'Skipped. The grammar engine will not work until llama-cpp-python is installed.' + #13#10 + #13#10 +
-          'Your CPU supports AVX2 only. Install the compatible build any time:' + #13#10 +
-          '  pip install --only-binary llama-cpp-python' + #13#10 +
-          '      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu' + #13#10 +
-          '      llama-cpp-python==0.3.19' + #13#10 + #13#10 +
-          'GPU build (NVIDIA + CUDA 12.8 only): see the GPU install guide.',
-          mbInformation, MB_OK);
+        PipSpec := 'llama-cpp-python==0.3.19';
+      MsgBox(
+        'Skipped — cloud API and CLI modes work without the local engine;' + #13#10 +
+        'local models will not work until it is installed.' + #13#10 + #13#10 +
+        'To add the local engine later, run in a Command Prompt:' + #13#10 +
+        '  "' + GPythonExe + '" -m pip install' + #13#10 +
+        '      --only-binary llama-cpp-python' + #13#10 +
+        '      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu' + #13#10 +
+        '      ' + PipSpec + #13#10 + #13#10 +
+        'GPU build (NVIDIA + CUDA 12.8 only): see the GPU install guide.',
+        mbInformation, MB_OK);
     end;
 
   finally
@@ -739,9 +609,10 @@ begin
 end;
 
 
-// ── CHECK 4: pystray / pillow / pynput ───────────────────────────────────────
-// Shows two lists: what is already installed (✓) and what needs to be added (•).
-// Only prompts and installs if something is actually missing.
+// ── UI packages: pystray / pillow / pynput ───────────────────────────────────
+// Safety net — the bundle ships all three pre-installed, so normally this just
+// adds ✓ lines to the completion summary. It only prompts and installs when
+// one is missing (e.g. a hand-edited or damaged install folder).
 procedure InstallUIDeps();
 var
   MissingPkgs: TArrayOfString;
@@ -799,83 +670,12 @@ begin
   begin
     MsgBox(
       'Skipped. You can install them manually any time:' + #13#10 + #13#10 +
-      '  pip install pystray pillow pynput',
+      '  "' + GPythonExe + '" -m pip install pystray pillow pynput',
       mbInformation, MB_OK);
     Exit;
   end;
 
   InstallWithProgress(MissingPkgs, 'Installing UI packages');
-end;
-
-
-// ── Main gate: called by Inno Setup before the install step ──────────────────
-// Step 1: ensure Python is available (system or portable download).
-// Step 2: check remaining dependencies with a status window.
-// Step 3: interactive package-install prompts.
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-var
-  CheckForm:  TForm;
-  CheckLabel: TLabel;
-begin
-  Result            := '';
-  GInstalledSummary := '';
-  GUsingEmbedded   := False;
-
-  // ── Step 1: Ensure Python is available ─────────────────────────────────────
-  // Try system Python first; if not found, download a portable copy.
-  if not CheckPython() then
-  begin
-    if not SetupEmbeddedPython() then
-    begin
-      Result := 'Python is required and the automatic download failed.' + #13#10 +
-                'Please check your internet connection, or install Python manually' + #13#10 +
-                'from https://www.python.org/downloads/ and run this installer again.';
-      Exit;
-    end;
-    GInstalledSummary := GInstalledSummary +
-      '  ' + #$2713 + '  Portable Python 3.12  (bundled with Vedium)' + #13#10;
-  end;
-
-  // ── Step 2: Check remaining requirements with a status window ──────────────
-  CheckForm := TForm.Create(nil);
-  try
-    CheckForm.Caption      := 'Vedium — Checking requirements';
-    CheckForm.ClientWidth  := ScaleX(420);
-    CheckForm.ClientHeight := ScaleY(70);
-    CheckForm.Position     := poScreenCenter;
-    CheckForm.BorderStyle  := bsDialog;
-
-    CheckLabel := TLabel.Create(CheckForm);
-    CheckLabel.Parent   := CheckForm;
-    CheckLabel.Left     := ScaleX(20);
-    CheckLabel.Top      := ScaleY(24);
-    CheckLabel.Width    := CheckForm.ClientWidth - ScaleX(40);
-    CheckLabel.AutoSize := False;
-
-    CheckLabel.Caption := 'Checking pip...';
-    CheckForm.Show;
-
-    if not CheckPip() then
-    begin
-      Result := 'pip is required. Please restore it and run this installer again.';
-      Exit;
-    end;
-
-    CheckLabel.Caption := 'Checking AI engine (llama-cpp-python)...';
-    CheckForm.Refresh;
-    DetectAVX512();
-    CheckLlamaCpp();
-
-    CheckLabel.Caption := 'Scanning installed packages...';
-    CheckForm.Refresh;
-    Sleep(400);
-
-  finally
-    CheckForm.Free;
-  end;
-
-  // ── Step 3: Interactive package-install prompts ─────────────────────────────
-  InstallUIDeps();
 end;
 
 
@@ -1071,28 +871,30 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   SummaryBlock: String;
   ModelBlock: String;
-  CopyCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
-    // Copy the portable Python into the install directory so it persists
-    // after {tmp} is cleaned up.  xcopy /E /I /Y copies the full tree
-    // (python.exe, Lib\site-packages\*, Scripts\*) silently.
-    if GUsingEmbedded and (GEmbedDir <> '') then
-      Exec('cmd.exe',
-           '/c xcopy "' + GEmbedDir + '" "' + ExpandConstant('{app}\python') + '" /E /I /Y /Q',
-           '', SW_HIDE, ewWaitUntilTerminated, CopyCode);
-    // After files are copied (so {app} exists), offer the optional model download.
+    // All provisioning runs AFTER the files are copied, against the private
+    // portable Python that now lives in {app}\python. Nothing outside the
+    // install folder is inspected or modified.
+    GPythonExe        := ExpandConstant('{app}\python\python.exe');
+    GInstalledSummary :=
+      '  ' + #$2713 + '  Portable Python 3.12  (private to Vedium, tkinter + UI packages included)' + #13#10;
+
+    DetectAVX512();
+    DetectNvidiaCuda();
+    CheckLlamaCpp();
+    InstallUIDeps();   // safety net — the bundle ships these pre-installed
     OfferModelDownload();
   end;
 
   if CurStep = ssDone then
   begin
-    // ── "Already on your system" summary block ────────────────────────────────
+    // ── "Installed with Vedium" summary block ─────────────────────────────────
     SummaryBlock := '';
     if GInstalledSummary <> '' then
       SummaryBlock :=
-        '── Already on your system ──────────────────────────' + #13#10 +
+        '── Installed with Vedium ───────────────────────────' + #13#10 +
         GInstalledSummary + #13#10;
 
     // ── Model block: skip the "go download one" instructions if we already
@@ -1133,5 +935,6 @@ Type: files; Name: "{app}\spell_daemon_config.json"
 Type: files; Name: "{app}\run.bat"
 ; Models downloaded by the installer (or later by the user) into the app folder
 Type: files; Name: "{app}\*.gguf"
-; Portable Python directory (if the installer downloaded one)
+; Bundled Python — [Files] entries are removed automatically, but packages
+; pip-installed at install time (the AI engine) would otherwise linger
 Type: filesandordirs; Name: "{app}\python"
