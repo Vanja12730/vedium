@@ -55,10 +55,10 @@ sys.modules.setdefault("pystray", types.ModuleType("pystray"))
 import tkinter as tk
 import tkinter.ttk as ttk
 
-from spell_daemon import constants as c
-from spell_daemon import ui_settings
-from spell_daemon import ui_thread
-from spell_daemon.ui_settings import model_tab, bottom_bar
+from vedium import constants as c
+from vedium import ui_settings
+from vedium import ui_thread
+from vedium.ui_settings import model_tab, bottom_bar
 
 
 def _walk(parent):
@@ -203,7 +203,7 @@ def main() -> int:
     assert main_toggle.variable.get() is False
     assert spell_toggle.variable.get() is False
 
-    source = (ROOT / "spell_daemon" / "ui_chat.py").read_text(encoding="utf-8")
+    source = (ROOT / "vedium" / "ui_chat.py").read_text(encoding="utf-8")
     label_pos = source.index('_append_display("\\nAI\\n", "ai_name")')
     wait_pos = source.index('_append_display("💭 Thinking…", "ai_stream")')
     worker_pos = source.index("def _stream_worker():", label_pos)

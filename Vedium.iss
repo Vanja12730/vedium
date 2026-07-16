@@ -2,7 +2,7 @@
 ;  Vedium.iss  —  Inno Setup 6 installer script
 ;
 ;  Produces a single Setup.exe that:
-;    1. Copies the spell_daemon package, run.vbs and a PRIVATE portable
+;    1. Copies the vedium package, run.vbs and a PRIVATE portable
 ;       Python 3.12 (with tkinter, pip, pystray, pillow, pynput pre-installed)
 ;       to the install folder — the user's own Python, if any, is never
 ;       touched or even looked at
@@ -77,7 +77,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 ; Core application files — copied to the install directory
-Source: "spell_daemon\*"; DestDir: "{app}\spell_daemon"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "vedium\*"; DestDir: "{app}\vedium"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "run.vbs";         DestDir: "{app}"; Flags: ignoreversion
 ; Private portable Python 3.12 — built by make_python_bundle.py. run.vbs
 ; prefers {app}\python\pythonw.exe, so the app always runs on this exact
@@ -95,6 +95,9 @@ Source: "{#SourcePath}app.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; The user's config and downloaded models live in {app} itself, NOT here, and
 ; are preserved across reinstalls.
 Type: filesandordirs; Name: "{app}\python"
+; Pre-rename package dir (the package was called spell_daemon before v1.2) —
+; without this an upgrade would leave the old copy of the app behind.
+Type: filesandordirs; Name: "{app}\spell_daemon"
 
 [Icons]
 ; Desktop shortcut — wscript.exe runs run.vbs silently (no console window)
@@ -570,8 +573,8 @@ begin
       begin
         MsgBox(
           'Download failed.' + #13#10 + #13#10 +
-          'You can install the GPU build manually after setup.' + #13#10 +
-          'See the GPU install guide for the full wheel URL and instructions.',
+          'You can install the GPU build manually after setup — see' + #13#10 +
+          'GPU_INSTALL_GUIDE.md in the Vedium GitHub repository.',
           mbError, MB_OK);
         Exit;
       end;
@@ -599,7 +602,8 @@ begin
         '      --only-binary llama-cpp-python' + #13#10 +
         '      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu' + #13#10 +
         '      ' + PipSpec + #13#10 + #13#10 +
-        'GPU build (NVIDIA + CUDA 12.8 only): see the GPU install guide.',
+        'GPU build (NVIDIA + CUDA 12.8 only): see GPU_INSTALL_GUIDE.md' + #13#10 +
+        'in the Vedium GitHub repository.',
         mbInformation, MB_OK);
     end;
 
@@ -681,7 +685,7 @@ end;
 
 // ── Write a minimal config that pre-selects the downloaded model ─────────────
 // Only writes if no config exists yet, so a reinstall never clobbers the user's
-// existing settings. spell_daemon's load_cfg() fills every other key from its
+// existing settings. vedium's load_cfg() fills every other key from its
 // own DEFAULT_CFG, so a single "model_path" entry is enough to make the app
 // work on first launch. JSON requires backslashes to be doubled.
 procedure WriteModelConfigIfAbsent(const ModelPath: String);
@@ -938,3 +942,7 @@ Type: files; Name: "{app}\*.gguf"
 ; Bundled Python — [Files] entries are removed automatically, but packages
 ; pip-installed at install time (the AI engine) would otherwise linger
 Type: filesandordirs; Name: "{app}\python"
+; App package — removes runtime __pycache__ dirs that [Files] doesn't know
+; about, plus a pre-rename spell_daemon dir if upgrading from before v1.2
+Type: filesandordirs; Name: "{app}\vedium"
+Type: filesandordirs; Name: "{app}\spell_daemon"

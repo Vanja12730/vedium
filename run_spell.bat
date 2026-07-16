@@ -7,19 +7,19 @@ rem      wheel is a cp312 build, so local GGUF models need 3.12
 rem   3. the py launcher's default Python (cloud / llama-server modes work fine)
 rem   4. whatever python is on PATH (last resort; PATH can be hijacked by venvs)
 if exist "%~dp0python\python.exe" (
-    "%~dp0python\python.exe" -m spell_daemon
+    "%~dp0python\python.exe" -m vedium
     goto :done
 )
 py -3.12 -V >nul 2>nul
 if %errorlevel%==0 (
-    py -3.12 -m spell_daemon
+    py -3.12 -m vedium
     goto :done
 )
 where py >nul 2>nul
 if %errorlevel%==0 (
-    py -3 -m spell_daemon
+    py -3 -m vedium
 ) else (
-    python -m spell_daemon
+    python -m vedium
 )
 :done
 pause

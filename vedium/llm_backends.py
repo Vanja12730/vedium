@@ -15,16 +15,16 @@ import urllib.request
 import urllib.error
 import json
 
-from spell_daemon.config import load_cfg
-from spell_daemon import diagnostics
-from spell_daemon.cli_models import (
+from vedium.config import load_cfg
+from vedium import diagnostics
+from vedium.cli_models import (
     CLIClient,
     CLIModelError,
     provenance_footer,
     selectable_models,
 )
-from spell_daemon.llm_state import _backend, _stream_cancel
-from spell_daemon.llm_postprocess import (
+from vedium.llm_state import _backend, _stream_cancel
+from vedium.llm_postprocess import (
     _THINKING_BUDGET_AUTO,
     _finish_is_length,
     _flag_hidden_reasoning,

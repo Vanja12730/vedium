@@ -17,10 +17,10 @@ import types
 
 @contextlib.contextmanager
 def _fake_backend(captured: list, events: list | None = None):
-    """Patch spell_daemon.llm so generation calls capture (fmt, system, user)
+    """Patch vedium.llm so generation calls capture (fmt, system, user)
     instead of running a model. Diagnostics land in `events` as
     (component, severity, message) tuples. Restores everything on exit."""
-    import spell_daemon.llm as llm
+    import vedium.llm as llm
 
     # The llm layer spans sibling modules; diagnostics must be stubbed in each
     # module that calls it, since every module binds its own name at import.
@@ -61,8 +61,8 @@ def _fake_backend(captured: list, events: list | None = None):
 def test_diacritics_spell_check_uses_live_mode_prompt() -> None:
     """The auto-correct diacritics path and the 'Diacritics Only' rephrase mode
     must share one prompt: the live mode prompt, including user overrides."""
-    import spell_daemon.constants as c
-    from spell_daemon.config import _merge_custom_modes
+    import vedium.constants as c
+    from vedium.config import _merge_custom_modes
 
     captured: list = []
     fmt = "Plain  (no template)"
@@ -115,7 +115,7 @@ def test_light_writing_modes_have_guardrails() -> None:
     """'More Casual', 'Simpler Language', and 'More Formal (Academic)' must
     carry the same don't-invent / preserve-details fences as the other writing
     modes — small models pad or invent without them."""
-    from spell_daemon.constants import _FACTORY_PROMPTS
+    from vedium.constants import _FACTORY_PROMPTS
 
     required = {
         "More Casual": [
@@ -160,7 +160,7 @@ class _FakeResp:
 def _cloud_client_with_responses(make_response):
     """A _CloudClient whose _request is faked; records payloads in .calls.
     Saves/restores the module-level reasoning flag and diagnostics."""
-    import spell_daemon.llm as llm
+    import vedium.llm as llm
 
     client = llm._CloudClient("https://example.invalid", "key", "thinking-model")
     client.calls = []
@@ -311,7 +311,7 @@ def _cloud_failover_env(dispatch):
     """Cloud backend with two favorites: 'flaky-model' (current) and
     'stable-model'. `dispatch(model, payload)` fakes each network call.
     Records the models called, in order, in the yielded list."""
-    import spell_daemon.llm as llm
+    import vedium.llm as llm
 
     base = "https://api.example.invalid/v1"
     calls: list = []

@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).resolve().parent / "spell_daemon" / "cli_models.py"
+MODULE_PATH = Path(__file__).resolve().parent / "vedium" / "cli_models.py"
 SPEC = importlib.util.spec_from_file_location("vedium_cli_models_test_target", MODULE_PATH)
 assert SPEC and SPEC.loader
 cli_models = importlib.util.module_from_spec(SPEC)

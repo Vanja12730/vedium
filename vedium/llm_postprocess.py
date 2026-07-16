@@ -9,9 +9,9 @@ import re
 import difflib
 import unicodedata
 
-from spell_daemon.constants import _CJK_RE, _word_count
-from spell_daemon import diagnostics
-from spell_daemon.llm_state import _backend
+from vedium.constants import _CJK_RE, _word_count
+from vedium import diagnostics
+from vedium.llm_state import _backend
 
 
 

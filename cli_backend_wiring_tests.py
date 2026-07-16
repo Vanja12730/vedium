@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
-PACKAGE = ROOT / "spell_daemon"
+PACKAGE = ROOT / "vedium"
 
 
 def _load(name: str, path: Path):
@@ -27,16 +27,16 @@ def _load(name: str, path: Path):
 
 
 def _load_isolated_llm():
-    package = types.ModuleType("spell_daemon")
+    package = types.ModuleType("vedium")
     package.__path__ = [str(PACKAGE)]
-    sys.modules["spell_daemon"] = package
+    sys.modules["vedium"] = package
     # llm.py pulls in its sibling modules via normal imports; purge any copies
     # cached by a previous call so every load starts from one fresh class set
     # (a stale llm_backends would hold last load's CLIClient and _backend).
     for sibling in ("llm_state", "llm_backends", "llm_postprocess"):
-        sys.modules.pop(f"spell_daemon.{sibling}", None)
+        sys.modules.pop(f"vedium.{sibling}", None)
 
-    constants = types.ModuleType("spell_daemon.constants")
+    constants = types.ModuleType("vedium.constants")
     constants._SLAVIC_LANGS = frozenset({"BHS"})
     constants._REPHRASE_PROMPTS = {
         "Diacritics Only": "Restore diacritics only.",
@@ -48,11 +48,11 @@ def _load_isolated_llm():
     constants._is_answer_mode = lambda mode: mode == "What's This About?"
     sys.modules[constants.__name__] = constants
 
-    config = types.ModuleType("spell_daemon.config")
+    config = types.ModuleType("vedium.config")
     config.load_cfg = lambda: {}
     sys.modules[config.__name__] = config
 
-    prompt_builder = types.ModuleType("spell_daemon.prompt_builder")
+    prompt_builder = types.ModuleType("vedium.prompt_builder")
     prompt_builder._build_prompt = lambda fmt, system, user: (
         f"FORMATTED::{fmt}::{system}::{user}", []
     )
@@ -62,15 +62,15 @@ def _load_isolated_llm():
     sys.modules[prompt_builder.__name__] = prompt_builder
 
     events = []
-    diagnostics = types.ModuleType("spell_daemon.diagnostics")
+    diagnostics = types.ModuleType("vedium.diagnostics")
     diagnostics.record = lambda *args, **kwargs: events.append((args, kwargs))
     diagnostics.record_throttled = lambda *args, **kwargs: events.append((args, kwargs))
     diagnostics.set_status = lambda **kwargs: None
     sys.modules[diagnostics.__name__] = diagnostics
     package.diagnostics = diagnostics
 
-    _load("spell_daemon.cli_models", PACKAGE / "cli_models.py")
-    llm = _load("spell_daemon.llm", PACKAGE / "llm.py")
+    _load("vedium.cli_models", PACKAGE / "cli_models.py")
+    llm = _load("vedium.llm", PACKAGE / "llm.py")
     return llm, events
 
 

@@ -9,8 +9,8 @@ import pystray
 from pynput.keyboard import Key, KeyCode
 import pynput.keyboard as _pynput_kb
 
-from spell_daemon import diagnostics
-from spell_daemon.constants import (
+from vedium import diagnostics
+from vedium.constants import (
     _SLAVIC_LANGS,
     _OS_RESERVED_HOTKEYS,
     _CTRL_KEYS,
@@ -20,9 +20,9 @@ from spell_daemon.constants import (
     _resolve_trigger_mode,
     _is_answer_mode,
 )
-from spell_daemon.config import load_cfg, save_cfg
-from spell_daemon.buffer import _Buffer
-from spell_daemon.replacement import (
+from vedium.config import load_cfg, save_cfg
+from vedium.buffer import _Buffer
+from vedium.replacement import (
     _kbctrl,
     _active_window_token,
     _copy_selected_text,
@@ -30,7 +30,7 @@ from spell_daemon.replacement import (
     _do_replace_rephrase,
     _do_replace_selected_text,
 )
-from spell_daemon.llm import (
+from vedium.llm import (
     _stream_cancel,
     rephrase_sentence_stream,
     _streaming_answer,
@@ -46,17 +46,17 @@ from spell_daemon.llm import (
     connect_cloud,
     connect_cli,
 )
-from spell_daemon.cli_models import CLIModelError
-from spell_daemon.ui_toasts import (
+from vedium.cli_models import CLIModelError
+from vedium.ui_toasts import (
     _Toast,
     _EditableToast,
     _open_recent_rephrases,
     _info_toast,
 )
-from spell_daemon.ui_thread import _ensure_ui_thread, _ui_call
-from spell_daemon.ui_settings import _open_settings
-from spell_daemon.ui_chat import _open_chat_window
-from spell_daemon.ui_tray import _make_icon
+from vedium.ui_thread import _ensure_ui_thread, _ui_call
+from vedium.ui_settings import _open_settings
+from vedium.ui_chat import _open_chat_window
+from vedium.ui_tray import _make_icon
 
 
 def _surface_cli_error(exc: Exception) -> None:

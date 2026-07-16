@@ -12,19 +12,19 @@ import time
 import json
 import threading
 
-from spell_daemon.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
-from spell_daemon.config import load_cfg
-from spell_daemon.prompt_builder import _build_prompt, _build_chat_prompt
-from spell_daemon import diagnostics
-from spell_daemon.cli_models import CLIClient, CLIModelError, provenance_footer
+from vedium.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
+from vedium.config import load_cfg
+from vedium.prompt_builder import _build_prompt, _build_chat_prompt
+from vedium import diagnostics
+from vedium.cli_models import CLIClient, CLIModelError, provenance_footer
 
 # Sibling modules kept reachable as attributes (tests patch their internals).
-from spell_daemon import llm_state
-from spell_daemon import llm_backends
-from spell_daemon import llm_postprocess
+from vedium import llm_state
+from vedium import llm_backends
+from vedium import llm_postprocess
 
-from spell_daemon.llm_state import _ActiveBackend, _backend, _stream_cancel
-from spell_daemon.llm_backends import (
+from vedium.llm_state import _ActiveBackend, _backend, _stream_cancel
+from vedium.llm_backends import (
     _make_llama,
     _LlamaServerClient,
     _CloudClient,
@@ -56,7 +56,7 @@ from spell_daemon.llm_backends import (
     _complete_prompt,
     _stream_prompt,
 )
-from spell_daemon.llm_postprocess import (
+from vedium.llm_postprocess import (
     _THINKING_BUDGET_AUTO,
     _strip_channels,
     _strip_reasoning,

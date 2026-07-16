@@ -129,7 +129,7 @@ def apply_scheme(name: str):
 
     import sys
     for mod_name, mod in list(sys.modules.items()):
-        if mod is not None and ("spell_daemon" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
+        if mod is not None and ("vedium" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
             for key in ["BG", "SURFACE", "SURF2", "ACCENT", "ACCENT2", "TEXT", "MUTED", "SUCCESS", "WARN", "ERR"]:
                 if hasattr(mod, key):
                     setattr(mod, key, s[key])
@@ -146,7 +146,7 @@ def apply_font_size(offset: int):
 
     import sys
     for mod_name, mod in list(sys.modules.items()):
-        if mod is not None and ("spell_daemon" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
+        if mod is not None and ("vedium" in mod_name or mod_name in ["ui_settings", "ui_toasts", "daemon", "replacement"]):
             if hasattr(mod, "FONT_B"):
                 setattr(mod, "FONT_B", FONT_B)
             if hasattr(mod, "FONT_H"):

@@ -49,15 +49,16 @@ Requires Python 3.10+ from [python.org](https://www.python.org/downloads/)
 git clone <this-repo-url>
 cd vedium
 py -3.12 -m pip install -r requirements.txt
-py -3.12 -m spell_daemon
+py -3.12 -m vedium
 ```
 
 Or double-click `run.vbs` to start it without a console window.
 
 To use a **local model** you also need llama-cpp-python — see the
 commented instructions in [requirements.txt](requirements.txt) (plain
-`pip install llama-cpp-python` will not work on Windows). Cloud API and
-CLI backends need nothing extra.
+`pip install llama-cpp-python` will not work on Windows), or
+[GPU_INSTALL_GUIDE.md](GPU_INSTALL_GUIDE.md) for the NVIDIA GPU build.
+Cloud API and CLI backends need nothing extra.
 
 ## Choosing a model (local backend)
 

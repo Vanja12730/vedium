@@ -5,7 +5,7 @@ Creates  python_embed\  next to this script:
   - tkinter runtime grafted in from THIS interpreter (the embeddable build
     omits it, and the whole Vedium UI is Tk)
   - pip bootstrapped, UI packages (pystray, pillow, pynput) pre-installed
-  - python312._pth set up so "python -m spell_daemon" works from the install
+  - python312._pth set up so "python -m vedium" works from the install
     folder ('..' puts {app} on sys.path when the bundle lives in {app}\python)
 
 llama-cpp-python is NOT bundled — the right wheel depends on the end user's
@@ -71,7 +71,7 @@ def main() -> None:
     # Relative entries resolve against the bundle dir:
     #   .   -> the bundle itself (_tkinter.pyd and friends)
     #   ..  -> the bundle's parent: {app} once installed, repo root in dev,
-    #          which is what makes "-m spell_daemon" importable
+    #          which is what makes "-m vedium" importable
     (BUNDLE / "python312._pth").write_text(
         "python312.zip\n.\n..\nLib\\site-packages\nimport site\n",
         encoding="ascii",
@@ -99,12 +99,12 @@ def main() -> None:
                       "--disable-pip-version-check",
                       "--no-warn-script-location", *UI_PACKAGES)
 
-    print("[6/6] Smoke test (tkinter + UI packages + spell_daemon import)")
+    print("[6/6] Smoke test (tkinter + UI packages + vedium import)")
     run_bundle_python(
         "-c",
         "import tkinter, tkinter.ttk, pystray, pynput; "
         "from PIL import Image; "
-        "import spell_daemon; "
+        "import vedium; "
         "print('bundle OK  tk', tkinter.TkVersion)",
     )
 

@@ -23,12 +23,12 @@ sys.path.insert(0, repo)
 
 import tkinter as tk
 
-from spell_daemon import constants as c
-from spell_daemon import config as sd_config
-from spell_daemon import ui_settings
-from spell_daemon import ui_chat
-from spell_daemon import ui_thread
-from spell_daemon.ui_settings import model_tab, bottom_bar
+from vedium import constants as c
+from vedium import config as sd_config
+from vedium import ui_settings
+from vedium import ui_chat
+from vedium import ui_thread
+from vedium.ui_settings import model_tab, bottom_bar
 
 failures = []
 

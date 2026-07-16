@@ -3,7 +3,7 @@ import pathlib
 
 
 ROOT = pathlib.Path(__file__).resolve().parent
-PACKAGE = ROOT / "spell_daemon"
+PACKAGE = ROOT / "vedium"
 
 
 def _parse(path: pathlib.Path) -> ast.Module:
@@ -30,9 +30,9 @@ def _llm_layer_source() -> str:
 def test_no_launcher_uses_old_monolith() -> None:
     run_vbs = (ROOT / "run.vbs").read_text(encoding="utf-8")
     installer = (ROOT / "Vedium.iss").read_text(encoding="utf-8")
-    assert "spell_daemon.py" not in run_vbs
-    assert 'Source: "spell_daemon.py"' not in installer
-    assert "-m spell_daemon" in run_vbs
+    assert "vedium.py" not in run_vbs
+    assert 'Source: "vedium.py"' not in installer
+    assert "-m vedium" in run_vbs
 
 
 def test_standalone_chat_imports_and_symbols_exist() -> None:
@@ -167,12 +167,12 @@ def test_assistant_hotkeys_route_by_explicit_action() -> None:
     # daemon itself would require pynput, which this zero-install smoke harness
     # intentionally does not require.
     tree = _parse(PACKAGE / "daemon.py")
-    spell_daemon = next(
+    vedium = next(
         node for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "SpellDaemon"
     )
     handler_node = next(
-        node for node in spell_daemon.body
+        node for node in vedium.body
         if isinstance(node, ast.FunctionDef) and node.name == "_handle_rephrase_hotkey_impl"
     )
 
