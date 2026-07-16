@@ -9,6 +9,18 @@ Pillow>=10.0       # tray icon rendering
 
 # Optional — only needed for the local GGUF backend
 # (Settings -> Model -> "Local model (.gguf)").
-# Cloud API and llama-server backends work without it.
-# The Windows installer ships a pinned build; if installing manually:
-#   pip install llama-cpp-python
+# Cloud API, CLI, and llama-server backends work without it.
+#
+# Do NOT plain "pip install llama-cpp-python" on Windows — that tries to
+# compile from source and fails without MSVC. Use the prebuilt CPU wheels:
+#
+#   pip install --only-binary llama-cpp-python ^
+#     --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu ^
+#     llama-cpp-python
+#
+# On CPUs without AVX-512 (all AMD Ryzen, pre-12th-gen Intel) pin v0.3.19 —
+# newer CPU wheels are AVX-512 builds and crash with STATUS_ILLEGAL_INSTRUCTION:
+#
+#   ... llama-cpp-python==0.3.19
+#
+# NVIDIA GPU build (CUDA 12.8, Python 3.12): see the GPU install guide.
