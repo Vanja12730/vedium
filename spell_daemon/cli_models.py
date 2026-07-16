@@ -17,6 +17,11 @@ from pathlib import Path
 
 
 SUBPROCESS_TIMEOUT = 240.0
+# The daemon normally runs under pythonw.exe, which has no console — so every
+# console-app CLI call would otherwise flash a brand-new console window on
+# screen. CREATE_NO_WINDOW gives the child an invisible console instead.
+# (0 on non-Windows, where the flag does not exist and no flash occurs.)
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable")
 EFFORT_LEVELS = ("", "low", "medium", "high", "xhigh", "max")
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
@@ -293,6 +298,7 @@ def run_claude(
             errors="replace",
             cwd=cwd,
             timeout=SUBPROCESS_TIMEOUT,
+            creationflags=_CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         raise CLIModelError("The CLI took longer than 240s and was stopped.") from exc
@@ -362,6 +368,7 @@ def run_codex(
                 errors="replace",
                 cwd=cwd,
                 timeout=SUBPROCESS_TIMEOUT,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except subprocess.TimeoutExpired as exc:
             raise CLIModelError("The CLI took longer than 240s and was stopped.") from exc
@@ -421,6 +428,7 @@ def run_agy(
             errors="replace",
             cwd=cwd,
             timeout=SUBPROCESS_TIMEOUT,
+            creationflags=_CREATE_NO_WINDOW,
         )
     except subprocess.TimeoutExpired as exc:
         raise CLIModelError("The CLI took longer than 240s and was stopped.") from exc
@@ -476,7 +484,11 @@ def converse(
     _check_effort(effort)
     system, prompt = flatten_messages(messages)
 
-    with tempfile.TemporaryDirectory(prefix="vedium_cli_") as cwd:
+    # ignore_cleanup_errors: on Windows a CLI can leave a detached child whose
+    # cwd is this directory, making the rmdir fail AFTER a successful reply.
+    # A stranded (tiny) temp dir is acceptable; losing the reply is not.
+    with tempfile.TemporaryDirectory(
+            prefix="vedium_cli_", ignore_cleanup_errors=True) as cwd:
         if model.startswith("claude-"):
             alias = model.removeprefix("claude-")
             if alias not in CLAUDE_ALIASES:
