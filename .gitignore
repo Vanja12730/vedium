@@ -4,6 +4,8 @@ __pycache__/
 
 # Installer build output
 Output/
+# Original Word version of GPU_INSTALL_GUIDE.md, kept locally only
+SpellDaemon_Install_Guide_GPU.docx
 # Portable Python bundle + download cache (rebuild: py -3.12 make_python_bundle.py)
 python_embed/
 build_cache/
