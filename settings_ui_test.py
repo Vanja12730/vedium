@@ -1,7 +1,7 @@
 """Structural verification harness for the Settings window.
 
 Builds the real Settings UI in-process (no daemon, no keyboard listener),
-walks every tab, presses Save & Connect, and exercises the singleton and
+walks every tab, presses Connect, and exercises the singleton and
 close paths.  Network, credential-store, and model-loading calls are
 stubbed so the test never touches the real system state; the config file
 is redirected to a scratch copy so the user's real config is untouched.
@@ -60,7 +60,7 @@ model_tab.detect_local_server = lambda *a, **k: ""
 bottom_bar.connect_cloud = model_tab.connect_cloud
 bottom_bar.connect_server = model_tab.connect_server
 bottom_bar.connect_cli = lambda *a, **k: "Stub CLI backend"
-model_tab.detect_clis = lambda: {
+model_tab.detect_clis = lambda **_kwargs: {
     "claude": {"path": r"C:\stub\claude.cmd", "models": [
         {"id": "claude-haiku", "label": "Claude Code - Haiku", "efforts": ["low"]},
     ]},
@@ -136,9 +136,9 @@ missing = [m for m in c._BUILTIN_MODES if m not in shown_modes]
 check("mode panels populated", not missing,
       f"missing modes: {missing}; listbox sizes: {[lb.size() for lb in listboxes]}")
 
-# ── Press Save & Connect ──────────────────────────────────────────────────────
-save_btns = [b for b in find_widgets(win, tk.Button) if "Save & Connect" in b.cget("text")]
-check("save button present", len(save_btns) == 1, f"found {len(save_btns)}")
+# ── Press Connect (saves + applies connection settings only) ─────────────────
+save_btns = [b for b in find_widgets(win, tk.Button) if "∞" in b.cget("text")]
+check("connect button present", len(save_btns) == 1, f"found {len(save_btns)}")
 if save_btns:
     save_btns[0].invoke()
     win.update()

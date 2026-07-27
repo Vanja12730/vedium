@@ -319,12 +319,10 @@ def load_cfg() -> dict:
         diagnostics.record("config", "warning", "Config could not be loaded; defaults restored.", str(exc))
         cfg = dict(c.DEFAULT_CFG)
     cfg["cli_models_enabled"] = bool(cfg.get("cli_models_enabled", False))
-    # Turning the main consent off also revokes the automatic-use consent. This
-    # prevents spell-check from silently coming back on after CLI models are
-    # re-enabled later.
-    cfg["cli_spell_check_enabled"] = bool(
-        cfg.get("cli_spell_check_enabled", False) and cfg["cli_models_enabled"]
-    )
+    # Automatic spell-check was removed for the AI CLI backend (2026-07-18):
+    # per-sentence requests are slow and spend subscription usage. Drop the
+    # legacy consent key from configs written by older versions.
+    cfg.pop("cli_spell_check_enabled", None)
     if cfg.get("cli_reasoning_effort", "") not in (
         "", "low", "medium", "high", "xhigh", "max",
     ):

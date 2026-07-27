@@ -3,16 +3,44 @@
 import tkinter as tk
 import tkinter.ttk as ttk
 
+from .. import diagnostics
+from ..config import save_cfg
 from ..constants import BG, SURFACE, TEXT, MUTED, ACCENT2, FONT_B, WORKING_LANGUAGE_OPTIONS
 from ..ui_widgets import _add_tooltip, _make_toggle, lbl_row, _TGL_INDENT
 
 
 def _build_behaviour_tab(ui):
     """Build the Behaviour tab: language, spell-check mode, diacritics-only
-    toggle, and the Advanced disclosure (trigger chars / min words / idle)."""
+    toggle, and the Advanced disclosure (trigger chars / min words / idle).
+
+    Every control applies and persists immediately — no Save button involved.
+    Connection settings (Model tab) are the only ones behind an explicit
+    Connect action."""
     win, cfg = ui.win, ui.cfg
     frm_behaviour = ui.frm_behaviour
     _bind_scroll = ui.bind_scroll
+    on_cfg_saved = ui.on_cfg_saved
+
+    def _commit(key: str, value, note: str):
+        """Apply one behaviour setting immediately: update the live config,
+        persist it, and push it to the running daemon."""
+        if cfg.get(key) == value:
+            return
+        cfg[key] = value
+        save_cfg(cfg)
+        on_cfg_saved(cfg)
+        if key == "spell_check_mode":
+            diagnostics.set_status(spell_check_mode=value)
+        diagnostics.record("config", "info", note)
+
+    def _commit_spin(key: str, var, fallback, cast, note: str):
+        """Commit a spinbox value; restore the stored value on unparsable input."""
+        try:
+            value = cast(var.get())
+        except (tk.TclError, ValueError):
+            var.set(cfg.get(key, fallback))
+            return
+        _commit(key, value, note)
 
     # ── Working language ──────────────────────────────────────────────────────
     lang_var = tk.StringVar(master=win, value=cfg.get("working_language", "Auto"))
@@ -23,6 +51,9 @@ def _build_behaviour_tab(ui):
                            state="readonly", font=FONT_B, width=12)
     lang_cb.pack(anchor="w")
     _bind_scroll(lang_cb)
+    lang_cb.bind("<<ComboboxSelected>>", lambda _e: _commit(
+        "working_language", lang_var.get(),
+        f"Working language set to {lang_var.get()}."))
     tk.Label(lf, text="Auto: output stays in the same language as the input",
              font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w")
 
@@ -42,6 +73,9 @@ def _build_behaviour_tab(ui):
             sc_frame, text=_sc_label, variable=sc_mode_var, value=_sc_val,
             font=FONT_B, bg=BG, fg=TEXT, activebackground=BG,
             selectcolor=SURFACE, relief="flat", cursor="hand2",
+            command=lambda: _commit(
+                "spell_check_mode", sc_mode_var.get(),
+                f"Spell-check mode set to {sc_mode_var.get()}."),
         ).pack(anchor="w")
     tk.Label(sc_frame,
              text="Off disables sentence correction; both Assistant hotkeys still work",
@@ -53,7 +87,10 @@ def _build_behaviour_tab(ui):
     diacr_frame = tk.Frame(frm_behaviour, bg=BG)
     diacr_frame.grid(row=2, column=1, sticky="w", pady=7)
     _make_toggle(diacr_frame, diacr_var,
-                 "Auto spell-check restores diacritics only (no grammar fixes)"
+                 "Auto spell-check restores diacritics only (no grammar fixes)",
+                 command=lambda: _commit(
+                     "diacritics_only_auto", bool(diacr_var.get()),
+                     f"Diacritics-only mode {'enabled' if diacr_var.get() else 'disabled'}."),
                  ).pack(anchor="w")
     tk.Label(diacr_frame,
              text="Useful when typing BHS (Bosnian/Croatian/Serbian) without diacritics",
@@ -124,21 +161,37 @@ def _build_behaviour_tab(ui):
             activebackground=BG, activeforeground=ACCENT2,
             selectcolor=SURFACE,
             relief="flat", cursor="hand2",
+            command=lambda: _commit(
+                "trigger_chars", _trig_string(), "Trigger characters updated."),
         ).grid(row=0, column=_col, padx=(0, 14), sticky="w")
     tk.Label(_trig_frame, text="Characters that end a sentence and trigger spell-check",
              font=("Segoe UI", 8), bg=BG, fg=MUTED).grid(
                  row=1, column=0, columnspan=len(_TRIGGER_OPTIONS), sticky="w", pady=(2, 0))
 
+    def _commit_min(_event=None):
+        _commit_spin("min_word_count", min_var, 2, int,
+                     "Minimum word count updated.")
+
+    def _commit_idle(_event=None):
+        _commit_spin("idle_reset_sec", idle_var, 30.0, float,
+                     "Idle reset updated.")
+
     _adv_lbl("Min words", 1)
-    tk.Spinbox(adv_body, from_=1, to=10, textvariable=min_var, width=5,
-               font=FONT_B, bg=SURFACE, fg=TEXT,
-               relief="flat").grid(row=1, column=1, sticky="w", pady=5)
+    min_sb = tk.Spinbox(adv_body, from_=1, to=10, textvariable=min_var, width=5,
+                        font=FONT_B, bg=SURFACE, fg=TEXT,
+                        relief="flat", command=_commit_min)
+    min_sb.grid(row=1, column=1, sticky="w", pady=5)
+    min_sb.bind("<FocusOut>", _commit_min)
+    min_sb.bind("<Return>", _commit_min)
 
     _adv_lbl("Idle reset (s)", 2)
     idle_sb = tk.Spinbox(adv_body, from_=0.0, to=120.0, increment=5.0,
                          textvariable=idle_var, width=5,
-                         font=FONT_B, bg=SURFACE, fg=TEXT, relief="flat")
+                         font=FONT_B, bg=SURFACE, fg=TEXT, relief="flat",
+                         command=_commit_idle)
     idle_sb.grid(row=2, column=1, sticky="w", pady=5)
+    idle_sb.bind("<FocusOut>", _commit_idle)
+    idle_sb.bind("<Return>", _commit_idle)
     _add_tooltip(idle_sb,
         "If you stop typing for this many seconds (e.g. while switching apps),\n"
         "the sentence buffer is automatically cleared before the next keystroke.\n"

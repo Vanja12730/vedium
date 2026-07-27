@@ -423,8 +423,11 @@ def codex_default_model():
 
 Antigravity CLI serves Google's Gemini family plus a few third-party models
 through the user's Google account (free tier, or paid Google AI Pro/Ultra).
-Verified against agy 1.1.1 on Windows, 2026-07-11 — re-verify with
-`agy --help` per the version-drift warning above.
+Verified against agy 1.1.5 on Windows, 2026-07-23 — re-verify with
+`agy --help` per the version-drift warning above. **agy moves fast and has
+already broken two assumptions in this guide between 1.1.1 and 1.1.5** (see
+the version-drift box at the end of this section); treat every claim here as
+something to re-test, not to trust.
 
 ### The exact command
 
@@ -433,14 +436,14 @@ agy -p "<full prompt text>" \
     --mode plan \
     --print-timeout 240s \
     --log-file <tempfile-in-cwd> \
-    [--model "<exact display label>"]
+    [--model "<exact name from `agy models`>"]
 ```
 
 - **The prompt is a command-line argument, not stdin.** Pass empty stdin and
   close it. Windows caps a command line at 32767 characters, so reject
   prompts over ~30000 characters with an actionable "too long" error before
   spawning.
-- **The reply is plain text on stdout** (agy 1.1.1 has no JSON output
+- **The reply is plain text on stdout** (agy 1.1.5 has no JSON output
   format). Strip it; empty stdout or non-zero exit → error.
 - `--mode plan` is the read-only mode — the safety equivalent of Codex's
   `--sandbox read-only`. Still use a neutral/empty cwd per Step 0 question 3.
@@ -448,16 +451,20 @@ agy -p "<full prompt text>" \
   subprocess timeout.
 - No system-prompt flag: prepend an `[Instructions]` block exactly like
   Codex (section 6).
-- No reasoning-effort flag: **the effort level is part of the model label**
-  ("Gemini 3.5 Flash (Low)" vs "(High)"). Ignore your app's effort setting
-  for agy models.
+- **Reasoning effort:** 1.1.5 added `--effort low|medium|high`, which selects
+  the effort variant of a base model (`--model gemini-3.6-flash --effort high`
+  resolves to "Gemini 3.6 Flash (High)"). You do **not** need it: the names
+  `agy models` prints already carry the level (`gemini-3.6-flash-high`), so
+  picking a listed name is sufficient and one fewer moving part. If you do
+  wire the app's effort setting through, note that agy takes only three levels
+  — clamp anything higher (`xhigh`/`max`) to `high`.
 
 ### TTY behavior (MUST know, or everything appears broken)
 
-- Only `-p`/`--print` mode works headless. `agy models`, `agy` interactive
-  mode, and most subcommands **hang forever without a real terminal** — do
-  not call them from your app, not even with output redirected to a file.
-- Print mode works from ordinary subprocess pipes on agy 1.1.1. Older
+- `agy` interactive mode and sign-in need a real terminal. Print mode
+  (`-p`/`--print`) and `agy models` both work fine headless — see the next
+  section for how to call `agy models` safely.
+- Print mode works from ordinary subprocess pipes on agy 1.1.5. Older
   versions silently dropped stdout under pipes (google-antigravity issue
   #76); after any agy update, re-verify with one piped `pong` test before
   trusting it.
@@ -465,52 +472,101 @@ agy -p "<full prompt text>" \
   errors — your timeout is the backstop; tell the user to run `agy` once in
   their own terminal.
 
-### The silent-model-substitution trap (real bug, MUST handle)
+### Model discovery (ask the CLI — MUST NOT hard-code)
 
-`--model` accepts the **exact display label** shown by `agy models`
-(e.g. `"Gemini 3.5 Flash (Low)"`). For ANY name it does not recognize —
-including plausible slug spellings like `gemini-3.5-flash-low` — agy prints
-**no error, exits 0, and silently runs the user's default model instead**.
-Some unrecognized-but-accepted spellings even resolve to a different
-reasoning level than requested. Never trust exit code + output alone.
-
-The only place the real selection is visible is agy's run log. Pass
-`--log-file <path inside your throwaway temp dir>` and verify after the run:
-
-1. If the log contains `Failed to resolve model flag` → the name was
-   rejected; raise "model list has changed; run `agy models` and reselect".
-2. If a specific model was requested, require
-   `label="<requested label>"` to appear in the log; otherwise raise the
-   same error. On success, that label is your provenance string.
-3. For the "CLI default" entry (no `--model` flag), extract the last
-   `label="…"` occurrence as the served model for provenance.
-
-### Model discovery (static list, log-verified)
-
-`agy models` needs a real TTY, and there is no local cache file to read
-(unlike Codex), so you cannot discover models programmatically. Ship a
-static list captured from a real `agy models` run, plus a "CLI default"
-entry, and rely on the log verification above to convert list drift into a
-clear user-facing error instead of silent wrong-model spend. Snapshot from
-agy 1.1.1 (2026-07-11):
+**`agy models` is the source of truth.** It runs headless (verified on 1.1.5
+with stdin closed and both streams piped: exit 0, one model name per line on
+stdout, nothing on stderr, ~2.5 s). Run it, take every non-empty line, and
+expose one app model id per line plus a "CLI default" entry.
 
 ```
-Gemini 3.5 Flash (Medium)   Gemini 3.5 Flash (High)   Gemini 3.5 Flash (Low)
-Gemini 3.1 Pro (Low)        Gemini 3.1 Pro (High)
-Claude Sonnet 4.6 (Thinking)  Claude Opus 4.6 (Thinking)  GPT-OSS 120B (Medium)
+gemini-3.6-flash-high     gemini-3.5-flash-high    gemini-3.1-pro-high
+gemini-3.6-flash-medium   gemini-3.5-flash-medium  gemini-3.1-pro-low
+gemini-3.6-flash-low      gemini-3.5-flash-low     claude-sonnet-4-6
+claude-opus-4-6-thinking  gpt-oss-120b-medium
 ```
 
-When capturing your own snapshot, ask the user to run `agy models` and paste
-the output — do not try to automate a TTY.
+That output is an *example*, not a list to copy into your source. An earlier
+version of this guide told you to ship a static snapshot because `agy models`
+supposedly needed a TTY. That was wrong, and the cost was real: the snapshot
+went stale within days of the next agy release and users could not select
+newly-added models at all. Do not reintroduce it.
+
+Practical requirements:
+
+- **Cache it per process.** ~2.5 s is too slow to repeat on every detection
+  pass, and far too slow to run on a UI thread. Fetch once, reuse, and give
+  the user an explicit "Refresh" control that re-runs it off the UI thread so
+  a CLI update is picked up without an app restart.
+- **Do not cache failures.** If the call fails, return "no models" for now and
+  retry on the next pass — a CLI that is momentarily busy or signed out should
+  recover on its own.
+- **Degrade to the CLI default.** If `agy models` cannot be read, still offer
+  the bare `agy` id (no `--model`). Never let a model-list failure hide the
+  fact that the CLI itself is installed.
+- **Derive ids by slugifying whatever it printed**
+  (`re.sub(r"[^a-z0-9.]+", "-", name.lower()).strip("-")`), and keep the
+  original string to pass back as `--model`. Slugifying is a no-op on the
+  slugs 1.1.5 prints, and it still yields stable ids if a future version goes
+  back to display labels.
+
+### Model-name drift and the substitution trap (MUST handle)
+
+agy renamed its models between 1.1.1 and 1.1.5. 1.1.1 printed and accepted
+**display labels** (`"Gemini 3.5 Flash (Low)"`); 1.1.5 prints **stable slugs**
+(`gemini-3.6-flash-low`) and accepts both. This is exactly why you pass back
+the string the CLI just gave you rather than one you constructed.
+
+Behavior on an unrecognized `--model` also changed, and both versions must be
+handled because you cannot control which one the user has installed:
+
+- **1.1.5 fails loudly:** exit code 1, nothing on stdout, and
+  `Error: invalid model selection (…)` plus an "Available models:" list on
+  stderr. Your ordinary non-zero-exit check already catches this.
+- **1.1.1 failed silently:** no error, **exit 0**, and it ran the user's
+  default model instead. Some unrecognized-but-accepted spellings even
+  resolved to a different reasoning level than requested.
+
+So keep the log check as well. Pass `--log-file <path inside your throwaway
+temp dir>` and, after the run:
+
+1. If a specific model was requested and the log contains
+   `Failed to resolve model flag` → raise "model list has probably changed;
+   refresh the list and reselect".
+2. Take the **last** `label="…"` occurrence in the log as the served model for
+   provenance — for the "CLI default" entry and for explicit picks alike.
+
+Note what step 2 does *not* do: it does not compare that label to what you
+requested. The log records the **display label** even when the run was
+requested by slug, so `label="Gemini 3.6 Flash (Low)"` for a
+`--model gemini-3.6-flash-low` request is correct, not a mismatch. An earlier
+version of this guide required `label="<requested>"` to appear verbatim; that
+check would reject every successful 1.1.5 run.
 
 ### Differences from Claude Code / Codex (memorize these four)
 
 1. Prompt on **argv**, not stdin (with the ~30000-character guard).
 2. Plain-text stdout; no JSON parsing, no `modelUsage` — provenance comes
-   from the `--log-file` label check instead.
-3. Model names are display labels, silently substituted when wrong — the
-   log verification is mandatory, not optional.
-4. No effort flag; reasoning level is baked into the model label.
+   from the last `label="…"` in the `--log-file` instead.
+3. Model names come from `agy models` at runtime and have already changed
+   shape once — pass back the exact string it printed, never a reconstructed
+   one.
+4. Effort is usually part of the model name; the separate `--effort` flag
+   (1.1.5+) accepts only `low|medium|high`.
+
+### Version-drift box (read before trusting anything above)
+
+Between 1.1.1 (2026-07-11) and 1.1.5 (2026-07-23), agy changed:
+
+| Assumption | 1.1.1 | 1.1.5 |
+|---|---|---|
+| `agy models` headless | believed to hang (wrong even then, or fixed since) | works: exit 0, one name per line, ~2.5 s |
+| Model naming | display labels | stable slugs, labels still accepted |
+| Unknown `--model` | silent substitution, exit 0 | exit 1 + stderr error listing valid models |
+| Reasoning effort | baked into the model name only | also a separate `--effort low\|medium\|high` |
+
+Re-run `agy --version`, `agy --help`, and one `agy models` call at the start
+of any port, and prefer runtime discovery over anything written down here.
 
 ## 7. Step 4 — Multi-turn conversations (all CLIs)
 
@@ -567,8 +623,9 @@ Every request spends the user's paid subscription usage, so:
   ("Command-line models are switched off. Enable them in settings.").
 - Persist the effort level too (e.g. `cli_reasoning_effort`, default `""` =
   CLI's own default). Valid values: `"" | low | medium | high | xhigh | max`
-  (clamped for Codex per section 6; ignored for Antigravity per section 6b —
-  its reasoning level is part of the model label).
+  (clamped for Codex per section 6; for Antigravity the level is part of the
+  model name, so the simplest correct choice is to ignore this setting there —
+  see section 6b if you want to wire up its narrower `--effort` flag instead).
 
 ### UI (SHOULD)
 
@@ -589,9 +646,9 @@ Append a small footer to every non-JSON reply:
 
 Format: `*(via <runner>[ · <exact served model id>][ · effort <level>])*` —
 runner is `Claude Code`, `Codex CLI`, or `Antigravity CLI`; the served model
-comes from the `modelUsage` logic in section 5 for Claude and from the
-log-verified label in section 6b for Antigravity (Codex doesn't report one;
-omit it).
+comes from the `modelUsage` logic in section 5 for Claude and from the run
+log's last `label="…"` in section 6b for Antigravity (Codex doesn't report
+one; omit it).
 
 ## 10. Step 7 — Concurrency, timeouts, and safety rails
 
@@ -756,20 +813,59 @@ def run_codex(path, system, prompt, cwd, effort):
         Path(out_path).unlink(missing_ok=True)
 
 
-AGY_MODELS = (  # snapshot of `agy models`; verified per-run via the log
-    "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)",
-    "Gemini 3.5 Flash (Low)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)",
-    "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)",
-    "GPT-OSS 120B (Medium)",
-)
 AGY_PROMPT_LIMIT = 30000  # prompt travels on argv; Windows caps ~32767 chars
+AGY_LIST_TIMEOUT = 30
+_agy_models_cache = None  # None = never fetched; a list = fetched (may be empty)
 
 
-def run_agy(path, model_label, system, prompt, cwd):
-    """Blocking. Returns (reply_text, confirmed_model_label).
+def discover_agy_models(path, refresh=False):
+    """Whatever `agy models` currently prints; [] on any failure.
 
-    model_label is the exact display label from `agy models`, or "" for the
-    user's default model.
+    Nothing is hard-coded, so an agy update brings its new models along with
+    no app change. Cached per process (the call costs ~2.5s and must never
+    run on a UI thread); failures are NOT cached, so a CLI that is briefly
+    unavailable is retried on the next pass.
+    """
+    global _agy_models_cache
+    if _agy_models_cache is not None and not refresh:
+        return list(_agy_models_cache)
+    try:
+        result = subprocess.run(
+            wrap_command(path) + ["models"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=AGY_LIST_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    names = [ln.strip() for ln in str(result.stdout or "").splitlines() if ln.strip()]
+    _agy_models_cache = names
+    return list(names)
+
+
+def agy_model_entries(models=()):
+    """[{id, label, agy_model}] — the CLI default plus one entry per model.
+
+    Ids are slugified so they stay stable if agy switches naming again; the
+    exact string agy printed is kept in agy_model to pass back as --model.
+    """
+    import re
+    entries = [{"id": "agy", "label": "Antigravity CLI default", "agy_model": ""}]
+    for name in models:
+        slug = re.sub(r"[^a-z0-9.]+", "-", name.lower()).strip("-")
+        entries.append({
+            "id": f"agy-{slug}",
+            "label": f"{name} (Antigravity CLI)",
+            "agy_model": name,
+        })
+    return entries
+
+
+def run_agy(path, model_name, system, prompt, cwd):
+    """Blocking. Returns (reply_text, served_model_label).
+
+    model_name is the exact string `agy models` printed, or "" for the user's
+    default model.
     """
     if system.strip():
         prompt = f"[Instructions]\n{system}\n\n{prompt}"
@@ -785,14 +881,16 @@ def run_agy(path, model_label, system, prompt, cwd):
         "--print-timeout", "240s",
         "--log-file", str(log_path),
     ]
-    if model_label:
-        command += ["--model", model_label]
+    if model_name:
+        command += ["--model", model_name]
     result = subprocess.run(
         command, input="", capture_output=True, text=True,
         encoding="utf-8", errors="replace", cwd=cwd,
         timeout=SUBPROCESS_TIMEOUT,
     )
     text = str(result.stdout or "").strip()
+    # agy 1.1.5 rejects an unknown --model here: exit 1, empty stdout, and
+    # "Error: invalid model selection (…)" on stderr.
     if result.returncode != 0 or not text:
         raise CLIModelError(
             f"agy exited with {result.returncode}: "
@@ -802,19 +900,18 @@ def run_agy(path, model_label, system, prompt, cwd):
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         log_text = ""
-    # agy silently substitutes its default model for unknown names (exit 0);
-    # the run log is the only place the real selection is visible.
-    if model_label:
-        if ("Failed to resolve model flag" in log_text
-                or f'label="{model_label}"' not in log_text):
-            raise CLIModelError(
-                f"Antigravity CLI did not run {model_label!r}. Its model "
-                "list has probably changed; run 'agy models' and reselect."
-            )
-        return text, model_label
+    # agy 1.1.1 instead substituted its default silently and exited 0; the run
+    # log was the only place that showed up, so keep this check for old builds.
+    if model_name and "Failed to resolve model flag" in log_text:
+        raise CLIModelError(
+            f"Antigravity CLI did not run {model_name!r}. Its model list has "
+            "probably changed; refresh the model list and reselect."
+        )
+    # The log names the resolved model by DISPLAY LABEL even when the run was
+    # requested by slug, so do not compare it to model_name — just report it.
     import re
     served = re.findall(r'label="([^"]+)"', log_text)
-    return text, served[-1] if served else ""
+    return text, served[-1] if served else model_name
 
 
 async def converse(model, messages, cwd, effort="", json_only=False):
@@ -861,21 +958,18 @@ async def converse(model, messages, cwd, effort="", json_only=False):
         path = resolve_cli("agy")
         if not path:
             raise CLIModelError("The Antigravity CLI (agy) was not found on PATH.")
-        # App model ids are slugified labels, e.g. "agy-gemini-3.5-flash-low";
-        # map the id back to the exact display label before invoking.
-        import re as _re
-        label = ""
-        if model != "agy":
-            by_slug = {
-                "agy-" + _re.sub(r"[^a-z0-9.]+", "-", l.lower()).strip("-"): l
-                for l in AGY_MODELS
-            }
-            label = by_slug.get(model, "")
-            if not label:
-                raise CLIModelError(f"Unknown Antigravity model {model!r}.")
+        # Map the app model id back to the exact string agy printed. The "agy"
+        # id is the CLI-default entry, whose agy_model is "" (no --model flag).
+        entry = next(
+            (e for e in agy_model_entries(discover_agy_models(path))
+             if e["id"] == model),
+            None,
+        )
+        if entry is None:
+            raise CLIModelError(f"Unknown Antigravity model {model!r}.")
         try:
             text, served = await asyncio.to_thread(
-                run_agy, path, label, system, prompt, cwd
+                run_agy, path, entry["agy_model"], system, prompt, cwd
             )
         except subprocess.TimeoutExpired:
             raise CLIModelError("The CLI took longer than 240s and was stopped.")
@@ -939,7 +1033,7 @@ function servedModel(usage, alias) {
   );
 }
 
-function runProcess(exe, args, { cwd, input }) {
+function runProcess(exe, args, { cwd, input, timeoutMs }) {
   return new Promise((resolve, reject) => {
     const [cmd, prefix] = wrapCommand(exe);
     const child = spawn(cmd, [...prefix, ...args], { cwd });
@@ -947,7 +1041,7 @@ function runProcess(exe, args, { cwd, input }) {
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("The CLI took longer than 240s and was stopped."));
-    }, SUBPROCESS_TIMEOUT_MS);
+    }, timeoutMs || SUBPROCESS_TIMEOUT_MS);
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", (err) => { clearTimeout(timer); reject(err); });
@@ -1013,15 +1107,50 @@ async function runCodex(cliPath, system, prompt, cwd, effort) {
   }
 }
 
-const AGY_MODELS = [ // snapshot of `agy models`; verified per-run via the log
-  "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)",
-  "Gemini 3.5 Flash (Low)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)",
-  "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)",
-  "GPT-OSS 120B (Medium)",
-];
 const AGY_PROMPT_LIMIT = 30000; // prompt travels on argv; Windows caps ~32767
+const AGY_LIST_TIMEOUT_MS = 30_000; // listing is fast; don't wait the full 240s
+let agyModelsCache = null; // null = never fetched; array = fetched (may be empty)
 
-async function runAgy(cliPath, modelLabel, system, prompt, cwd) {
+// Whatever `agy models` currently prints; [] on any failure. Nothing is
+// hard-coded, so an agy update brings its new models along with no app change.
+// Cached per process (~2.5s per call — never run it on a UI thread); failures
+// are NOT cached, so a briefly-unavailable CLI is retried on the next pass.
+async function discoverAgyModels(cliPath, refresh = false) {
+  if (agyModelsCache !== null && !refresh) return [...agyModelsCache];
+  let code, stdout;
+  try {
+    ({ code, stdout } = await runProcess(cliPath, ["models"], {
+      input: "", timeoutMs: AGY_LIST_TIMEOUT_MS,
+    }));
+  } catch {
+    return [];
+  }
+  if (code !== 0) return [];
+  const names = String(stdout || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  agyModelsCache = names;
+  return [...names];
+}
+
+// [{id, label, agyModel}] — the CLI default plus one entry per model. Ids are
+// slugified so they stay stable if agy switches naming again; the exact string
+// agy printed is kept in agyModel to pass back as --model.
+function agyModelEntries(models = []) {
+  const entries = [{ id: "agy", label: "Antigravity CLI default", agyModel: "" }];
+  for (const name of models) {
+    const slug = name.toLowerCase().replace(/[^a-z0-9.]+/g, "-").replace(/^-|-$/g, "");
+    entries.push({
+      id: `agy-${slug}`,
+      label: `${name} (Antigravity CLI)`,
+      agyModel: name,
+    });
+  }
+  return entries;
+}
+
+async function runAgy(cliPath, modelName, system, prompt, cwd) {
   if (system.trim()) prompt = `[Instructions]\n${system}\n\n${prompt}`;
   if (prompt.length > AGY_PROMPT_LIMIT)
     throw new Error(
@@ -1034,33 +1163,31 @@ async function runAgy(cliPath, modelLabel, system, prompt, cwd) {
     "--print-timeout", "240s",
     "--log-file", logPath,
   ];
-  if (modelLabel) args.push("--model", modelLabel);
+  if (modelName) args.push("--model", modelName);
   const { code, stdout, stderr } = await runProcess(cliPath, args, { cwd, input: "" });
   const text = String(stdout || "").trim();
+  // agy 1.1.5 rejects an unknown --model here: exit 1, empty stdout, and
+  // "Error: invalid model selection (…)" on stderr.
   if (code !== 0 || !text)
     throw new Error(`agy exited with ${code}: ${(stderr || stdout).trim().slice(0, 300)}`);
   let logText = "";
   try { logText = fs.readFileSync(logPath, "utf-8"); } catch {}
-  // agy silently substitutes its default model for unknown names (exit 0);
-  // the run log is the only place the real selection is visible.
-  if (modelLabel) {
-    if (
-      logText.includes("Failed to resolve model flag") ||
-      !logText.includes(`label="${modelLabel}"`)
-    )
-      throw new Error(
-        `Antigravity CLI did not run ${modelLabel}. Its model list has ` +
-          "probably changed; run 'agy models' and reselect."
-      );
-    return { text, served: modelLabel };
-  }
+  // agy 1.1.1 instead substituted its default silently and exited 0; the run
+  // log was the only place that showed up, so keep this check for old builds.
+  if (modelName && logText.includes("Failed to resolve model flag"))
+    throw new Error(
+      `Antigravity CLI did not run ${modelName}. Its model list has ` +
+        "probably changed; refresh the model list and reselect."
+    );
+  // The log names the resolved model by DISPLAY LABEL even when the run was
+  // requested by slug, so do not compare it to modelName — just report it.
   const served = [...logText.matchAll(/label="([^"]+)"/g)].map((m) => m[1]);
-  return { text, served: served.length ? served[served.length - 1] : "" };
+  return { text, served: served.length ? served[served.length - 1] : modelName };
 }
 
 module.exports = {
   resolveCli, flattenMessages, runClaude, runCodex, runAgy,
-  CLAUDE_ALIASES, AGY_MODELS,
+  discoverAgyModels, agyModelEntries, CLAUDE_ALIASES,
 };
 ```
 
@@ -1069,8 +1196,12 @@ module.exports = {
 - **Model ids:** if `claude` is detected, add `claude-sonnet`, `claude-opus`,
   `claude-haiku`, `claude-fable` to the picker; if `codex` is detected, add
   `codex` plus one id per discovered slug; if `agy` is detected, add `agy`
-  (CLI default) plus one slugified id per snapshot label
-  (e.g. `agy-gemini-3.5-flash-low`). Only while the opt-in toggle is ON.
+  (CLI default) plus one slugified id per name `agy models` printed
+  (e.g. `agy-gemini-3.6-flash-low`). Only while the opt-in toggle is ON.
+- **Refreshing the list:** Codex and Antigravity both discover their models at
+  runtime, so give the user a "Refresh" control on the model picker that
+  re-runs discovery (bypassing any cache) off the UI thread. Without it, models
+  added by a CLI update stay invisible until the app restarts.
 - **Routing:** a request for any of those ids goes to this module; everything
   else goes to the app's existing providers. Match by prefix
   (`claude-<known alias>`, `agy-<slug>`) and exact id (`codex`, `agy`).
@@ -1123,14 +1254,21 @@ multi-model or failover feature (question 4).
    exactly: pong" → "pong" with a Codex footer.
 9. **Effort setting:** set effort to `low`, send a trivial prompt → footer
    shows "effort low".
-9b. **Antigravity smoke test** (if installed): pick a cheap Flash model by
-    its exact label id, send "Reply with exactly: pong" → "pong" with an
-    Antigravity footer naming that same label (proves the log verification
-    confirmed the requested model actually served).
-9c. **Antigravity substitution guard:** temporarily add a fake label to the
-    static model list, request it → clean "did not run …; run 'agy models'"
-    error, NOT a silent success. Remove the fake afterwards. (Costs one
-    request on the default model.)
+9b. **Antigravity smoke test** (if installed): pick a cheap Flash model id,
+    send "Reply with exactly: pong" → "pong" with an Antigravity footer naming
+    that model. The footer shows the *display label* ("Gemini 3.6 Flash (Low)")
+    even though the request went out as a slug — that is correct.
+9c. **Antigravity discovery is live** (free): run `agy models` in a terminal
+    and compare it to the app's picker — same set, no extras, no missing
+    entries. Then confirm nothing in your source hard-codes those names
+    (`grep` for a model name; the only hits should be tests and comments).
+9d. **Antigravity refresh control** (free): with the app open, confirm the
+    Refresh control re-runs discovery and repopulates the picker without a
+    restart, and that the UI stays responsive during the ~2.5 s call.
+9e. **Antigravity bad-model guard:** request a model id that does not exist
+    → clean "did not run …" / "invalid model selection" error, NOT a silent
+    success on the default model. (Free on 1.1.5, which exits 1 before
+    spending anything; costs one default-model request on 1.1.1.)
 10. **Timeout path (optional):** temporarily set the timeout to 1 s, send any
     prompt → clean "took longer than" error, no zombie process, UI usable.
     Restore 240 s afterwards.
@@ -1157,8 +1295,11 @@ multi-model or failover feature (question 4).
 | Multi-model features break when one CLI model errors | CLI backend raises where the app expects error return values | Match the host error contract per Step 0 question 2 |
 | Only a single generic `codex` model shows up | Model list hard-coded instead of discovered | Read `~/.codex/models_cache.json` + `config.toml` per section 6 |
 | Codex model list wrong/empty after a CLI update | Cache format changed (it's undocumented) | The graceful fallback to bare `codex` is by design; update the parser |
-| `agy models` / `agy` hangs forever from your app | Those surfaces need a real TTY | Only `-p` print mode works headless (section 6b); get the model list from the user |
-| agy ran the wrong (default) model with exit 0 | Unknown `--model` names are silently substituted | Pass exact display labels and verify `label="…"` in the `--log-file` (section 6b) |
+| New models missing from the picker after an agy update | Model list hard-coded instead of discovered | Run `agy models` at runtime and cache per process (section 6b); add a Refresh control |
+| Every agy run fails with "did not run &lt;model&gt;" | Verifying `label="<requested>"` against a slug request — the log records the display label | Take the last `label="…"` as provenance; don't compare it to the requested name (section 6b) |
+| agy interactive mode hangs from your app | Interactive mode and sign-in need a real TTY | Only `-p` print mode and `agy models` work headless; tell the user to run `agy` once in their terminal |
+| agy ran the wrong (default) model with exit 0 | agy 1.1.1 silently substituted unknown `--model` names | Keep the `Failed to resolve model flag` log check for old builds; 1.1.5 exits 1 instead (section 6b) |
+| UI freezes ~2.5 s when the model picker opens | `agy models` called synchronously on the UI thread | Cache it per process and run refreshes on a worker thread (section 6b) |
 | agy `-p` returns nothing through pipes after an update | Regression of the non-TTY stdout bug (issue #76) | Re-run one piped `pong` test per agy update; fall back to file-redirected output if needed |
 | `agy` not found right after install | Installer updates registry PATH without broadcasting the change | New terminals/apps see it after a `WM_SETTINGCHANGE` broadcast, re-login, or reboot |
 | Very long chat fails only on Antigravity | Prompt travels on argv; Windows command-line limit | The ~30000-character guard in section 6b; shorten history or route long chats elsewhere |
@@ -1180,9 +1321,10 @@ multi-model or failover feature (question 4).
 - [ ] Codex invoked with `exec --sandbox read-only --skip-git-repo-check --color never --cd <folder> -o <tempfile> -`; temp file cleaned up
 - [ ] Codex system prompt prepended as `[Instructions]` block; effort clamped to the chosen model's supported levels (`high` when unknown)
 - [ ] Codex models discovered from `~/.codex/models_cache.json` (visibility == "list") with the config.toml default labelled; graceful fallback to bare `codex` when either file is unreadable
-- [ ] Antigravity invoked with `-p <prompt> --mode plan --print-timeout 240s --log-file <tempfile>` (+ `--model "<exact label>"`); prompt on argv with the ~30000-character guard; empty stdin
-- [ ] Antigravity model selection verified against the run log (`Failed to resolve` absent AND `label="<requested>"` present); silent default substitution surfaces as a clear error
-- [ ] Antigravity model list is a static snapshot from a real `agy models` run (needs a TTY — ask the user); effort setting ignored for agy models
+- [ ] Antigravity invoked with `-p <prompt> --mode plan --print-timeout 240s --log-file <tempfile>` (+ `--model "<exact name from agy models>"`); prompt on argv with the ~30000-character guard; empty stdin
+- [ ] Antigravity model list discovered by running `agy models` — **no model names hard-coded anywhere** — cached per process, failures not cached, graceful fallback to the bare `agy` id
+- [ ] A Refresh control re-runs CLI model discovery off the UI thread, so models added by a CLI update appear without an app restart
+- [ ] Antigravity provenance taken from the last `label="…"` in the run log and **not** compared to the requested name (the log records display labels, requests use slugs); `Failed to resolve model flag` still checked so agy 1.1.1's silent substitution surfaces as a clear error
 - [ ] Multi-turn history flattened to the labelled transcript with the closing instruction block
 - [ ] Subprocess never blocks the event loop; 240 s timeout with a clean error
 - [ ] Feature default-OFF, persisted toggle, clear "spends your subscription" label

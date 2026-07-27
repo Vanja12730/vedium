@@ -231,6 +231,19 @@ def _build_rephrase_tab(ui):
     creativity_scale.pack(side="left", padx=6)
     tk.Label(cf, text="Creative", font=FONT_B, bg=BG, fg=MUTED).pack(side="left")
 
+    def _commit_creativity(_event=None):
+        # Commit on release (not every drag tick) to avoid disk-write spam.
+        value = creativity_var.get() / 100
+        if cfg.get("rephrase_creativity") == value:
+            return
+        cfg["rephrase_creativity"] = value
+        save_cfg(cfg)
+        on_cfg_saved(cfg)
+        diagnostics.record("config", "info", f"Rephrase creativity set to {value:.2f}.")
+
+    creativity_scale.bind("<ButtonRelease-1>", _commit_creativity)
+    creativity_scale.bind("<KeyRelease>", _commit_creativity)
+
     # ── Rephrase mode prompts ─────────────────────────────────────────────────
     tk.Frame(frm_rephrase, bg=SURF2, height=1).grid(
         row=3, column=0, columnspan=2, sticky="ew", pady=(10, 6))

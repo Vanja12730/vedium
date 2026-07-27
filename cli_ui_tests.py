@@ -85,7 +85,7 @@ def main() -> int:
     model_tab.detect_local_server = lambda *a, **k: ""
     bottom_bar.connect_cloud = model_tab.connect_cloud
     bottom_bar.connect_server = model_tab.connect_server
-    model_tab.detect_clis = lambda: {
+    model_tab.detect_clis = lambda **_kwargs: {
         "claude": {
             "path": r"C:\stub\claude.cmd",
             "models": [{
@@ -107,7 +107,7 @@ def main() -> int:
 
     bottom_bar.connect_cli = _connect_cli
 
-    answers = [False, True, False, True]
+    answers = [False, True]
     warnings = []
 
     def _ask(title, message, **_kwargs):
@@ -141,9 +141,9 @@ def main() -> int:
         if isinstance(widget, tk.Frame) and hasattr(widget, "label")
     }
     main_toggle = toggles["Use installed AI CLIs as models"]
-    spell_toggle = toggles["Allow automatic spell-check with AI CLI"]
+    # The automatic CLI spell-check toggle was removed with the feature.
+    assert "Allow automatic spell-check with AI CLI" not in toggles
     assert main_toggle.variable.get() is False
-    assert spell_toggle.variable.get() is False
 
     main_toggle.invoke()
     win.update()
@@ -166,16 +166,8 @@ def main() -> int:
     )
     effort.set("low")
 
-    spell_toggle.invoke()
-    win.update()
-    assert spell_toggle.variable.get() is False
-    spell_toggle.invoke()
-    win.update()
-    assert spell_toggle.variable.get() is True
     assert warnings[0][0] == "Enable AI CLI models?"
     assert "subscription's usage" in warnings[0][1]
-    assert warnings[2][0] == "Enable automatic CLI spell-check?"
-    assert "whenever you complete a sentence" in warnings[2][1]
 
     cli_radio = next(
         widget for widget in _walk(win)
@@ -184,7 +176,7 @@ def main() -> int:
     cli_radio.invoke()
     save = next(
         widget for widget in _walk(win)
-        if isinstance(widget, tk.Button) and "Save & Connect" in widget.cget("text")
+        if isinstance(widget, tk.Button) and "∞" in widget.cget("text")
     )
     save.invoke()
     win.update()
@@ -193,15 +185,13 @@ def main() -> int:
     assert saved[-1]["cli_models_enabled"] is True
     assert saved[-1]["cli_model"] == "claude-haiku"
     assert saved[-1]["cli_reasoning_effort"] == "low"
-    assert saved[-1]["cli_spell_check_enabled"] is True
+    assert "cli_spell_check_enabled" not in saved[-1]
     assert connected.wait(2.0)
     assert connect_calls == [("claude-haiku", True, "low")]
 
-    # Disabling the main consent immediately revokes automatic-use consent.
     main_toggle.invoke()
     win.update()
     assert main_toggle.variable.get() is False
-    assert spell_toggle.variable.get() is False
 
     source = (ROOT / "vedium" / "ui_chat.py").read_text(encoding="utf-8")
     label_pos = source.index('_append_display("\\nAI\\n", "ai_name")')

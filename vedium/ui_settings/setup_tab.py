@@ -147,7 +147,7 @@ def _build_setup_tab(ui):
                 backend_txt = "The selected command-line model is not currently detected."
                 backend_col = ERR
             else:
-                backend_txt = f"AI CLI selected: {cli_model_var.get().strip()}. Click Save & Connect."
+                backend_txt = f"AI CLI selected: {cli_model_var.get().strip()}. Click Connect."
                 backend_col = WARN
         elif mode == "cloud":
             if not cloud_key_var.get().strip():

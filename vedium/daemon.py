@@ -240,6 +240,17 @@ class SpellDaemon:
                         cooldown_sec=20.0,
                     )
                     self.buf.key_char(c, idle_sec)
+                elif self.cfg.get("backend_mode") == "cli":
+                    # Automatic spell-check is not offered on the AI CLI
+                    # backend: per-sentence requests are slow (many seconds)
+                    # and each one spends subscription usage. Manual hotkeys
+                    # and Chat still work; skip the correction pipeline.
+                    diagnostics.record_throttled(
+                        "spell", "info",
+                        "Automatic spell-check is not available with AI CLI backends; sentence skipped.",
+                        cooldown_sec=20.0,
+                    )
+                    self.buf.key_char(c, idle_sec)
                 else:
                     result = self.buf.trigger(c, self.cfg.get("min_word_count", 2))
                     if result:
@@ -461,6 +472,12 @@ class SpellDaemon:
                 diacritics_only=diacr_only, cfg=self.cfg,
                 on_fallback=lambda failed, nxt: cloud_switches.append((failed, nxt)),
             )
+            if corrected is None:
+                # Model never consulted (backend still connecting, or CLI
+                # spell-check gate) — skip entirely so the capitalizer below
+                # can't fabricate a phantom case-only suggestion.
+                self.buf.finalize(replaced=False)
+                return
             corrected = _safe_model_correction(
                 sentence, corrected,
                 is_translation=is_translation,
@@ -542,7 +559,10 @@ class SpellDaemon:
                     "Cursor moved during correction; showing review toast instead of replacing automatically.",
                 )
 
-            if (sc_mode == "Auto" or case_only_fix) and not cursor_mv and not too_slow:
+            # case_only_fix only bypasses the no-change gate above; in Toast
+            # mode every correction — including capitalization-only — must go
+            # through the review toast, never a silent replace.
+            if sc_mode == "Auto" and not cursor_mv and not too_slow:
                 # Silent replace — re-read post atomically with set_busy so that a
                 # space (or any char) typed between our earlier post_text() snapshot
                 # and the selection cannot shift the cursor and corrupt the replace.

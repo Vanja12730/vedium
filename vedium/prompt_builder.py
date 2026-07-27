@@ -47,6 +47,26 @@ def _build_prompt(fmt: str, system: str, user: str):
              "<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>")
         s = ["<|END_OF_TURN_TOKEN|>"]
 
+    elif fmt.startswith("Harmony"):
+        # gpt-oss (OpenAI Harmony format).  The assistant turn is primed with
+        # the "final" channel header so the model answers directly instead of
+        # first emitting an "analysis" (chain-of-thought) message.  This
+        # matters doubly here: the in-process llama-cpp path drops special
+        # tokens (<|channel|>, <|message|>, …) during detokenisation, so any
+        # leaked analysis text would arrive without markers and be very hard
+        # to separate from the answer.  "Reasoning: low" reinforces the same
+        # intent; app instructions go in the developer role per the spec.
+        p = ("<|start|>system<|message|>Reasoning: low\n\n"
+             "# Valid channels: analysis, commentary, final. "
+             "Channel must be included for every message.<|end|>"
+             f"<|start|>developer<|message|># Instructions\n\n{system}<|end|>"
+             f"<|start|>user<|message|>{user}<|end|>"
+             "<|start|>assistant<|channel|>final<|message|>")
+        # <|return|>/<|end|> are EOG tokens, so in-process generation stops at
+        # the token level; the string stops matter for the llama-server path,
+        # which renders special tokens as text.
+        s = ["<|return|>", "<|end|>", "<|start|>"]
+
     else:  # Plain / fallback
         p = f"System: {system}\n\nUser: {user}\n\nAssistant:"
         s = ["\nUser:", "\nSystem:"]
@@ -133,6 +153,22 @@ def _build_chat_prompt(fmt: str, system: str, history: list) -> tuple:
                 p += f"<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>{turn['content']}<|END_OF_TURN_TOKEN|>"
         p += "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
         s = ["<|END_OF_TURN_TOKEN|>"]
+
+    elif fmt.startswith("Harmony"):
+        # See _build_prompt: the trailing "final" channel header suppresses
+        # the chain-of-thought message; past assistant turns are replayed as
+        # final-channel messages.
+        p = ("<|start|>system<|message|>Reasoning: low\n\n"
+             "# Valid channels: analysis, commentary, final. "
+             "Channel must be included for every message.<|end|>"
+             f"<|start|>developer<|message|># Instructions\n\n{system}<|end|>")
+        for turn in history:
+            if turn["role"] == "user":
+                p += f"<|start|>user<|message|>{turn['content']}<|end|>"
+            else:
+                p += f"<|start|>assistant<|channel|>final<|message|>{turn['content']}<|end|>"
+        p += "<|start|>assistant<|channel|>final<|message|>"
+        s = ["<|return|>", "<|end|>", "<|start|>"]
 
     else:  # Plain / fallback
         p = f"System: {system}\n\n"

@@ -140,26 +140,19 @@ def test_shared_helpers_require_and_forward_semantic_messages():
         raise AssertionError("CLI raw-prompt fallback must be forbidden")
 
 
-def test_automatic_cli_spell_check_has_a_separate_default_off_gate():
+def test_automatic_spell_check_is_unavailable_on_cli_backend():
     llm, events = _load_isolated_llm()
     client, calls = _client(llm, reply="Fixed sentence")
     llm._backend.client = client
 
-    original = "bad sentence"
-    disabled_cfg = {"cli_models_enabled": True, "cli_spell_check_enabled": False}
-    assert llm.spell_check_sentence(original, "Plain", cfg=disabled_cfg) == original
+    # None = "model never consulted"; the daemon pipeline skips the sentence
+    # entirely instead of treating it as a no-error result. The CLI backend
+    # never runs automatic spell-check — per-sentence requests are slow and
+    # spend subscription usage.
+    cfg = {"cli_models_enabled": True}
+    assert llm.spell_check_sentence("bad sentence", "Plain", cfg=cfg) is None
     assert calls == []
-    assert any("Automatic CLI spell-check is off" in args[2] for args, _ in events)
-
-    enabled_cfg = {"cli_models_enabled": True, "cli_spell_check_enabled": True}
-    corrected = llm.spell_check_sentence(original, "Plain", cfg=enabled_cfg)
-    assert corrected == "Fixed sentence"
-    assert len(calls) == 1
-    messages, request_enabled = calls[0]
-    assert request_enabled is True
-    assert messages[0]["role"] == "system"
-    assert messages[1]["role"] == "user"
-    assert "bad sentence" in messages[1]["content"]
+    assert any("not available with AI CLI backends" in args[2] for args, _ in events)
 
 
 def test_manual_rephrase_yields_once_without_footer():
@@ -234,9 +227,10 @@ def test_config_and_startup_source_guards_exist():
     config = (PACKAGE / "config.py").read_text(encoding="utf-8")
     daemon = (PACKAGE / "daemon.py").read_text(encoding="utf-8")
     assert '"cli_models_enabled":     False' in constants
-    assert '"cli_spell_check_enabled": False' in constants
+    # The CLI spell-check consent key was removed; configs migrate it away.
+    assert '"cli_spell_check_enabled"' not in constants
     assert '("local", "server", "cloud", "cli")' in config
-    assert 'cfg.get("cli_spell_check_enabled", False) and cfg["cli_models_enabled"]' in config
+    assert 'cfg.pop("cli_spell_check_enabled", None)' in config
     assert 'if mode == "cli":' in daemon
     assert "backend = connect_cli(" in daemon
     assert "The selected CLI never falls back to another backend." in daemon
@@ -246,7 +240,7 @@ def main() -> int:
     tests = [
         test_connect_cli_is_detection_only_and_opt_in,
         test_shared_helpers_require_and_forward_semantic_messages,
-        test_automatic_cli_spell_check_has_a_separate_default_off_gate,
+        test_automatic_spell_check_is_unavailable_on_cli_backend,
         test_manual_rephrase_yields_once_without_footer,
         test_standalone_chat_replays_history_and_adds_safe_footer,
         test_existing_backend_still_receives_exact_raw_prompt,

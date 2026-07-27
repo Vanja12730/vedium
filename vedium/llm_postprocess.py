@@ -49,6 +49,19 @@ _THOUGHT_END_RE = re.compile(r"<\s*\|?\s*thought[_\-\s]*end\s*\|?\s*>", re.IGNOR
 # The matching opener, used by the streaming filter to know reasoning has begun.
 _THOUGHT_OPEN_RE = re.compile(r"<\s*\|?\s*(?:thought[_\-\s]*(?:start|begin)?|channel)\s*\|?\s*>", re.IGNORECASE)
 
+# Detokenised Harmony leak (gpt-oss run through the in-process llama-cpp path,
+# e.g. with the wrong prompt format selected): llama-cpp renders special tokens
+# (<|channel|>, <|message|>, <|start|>, <|end|>) as empty strings, so the raw
+# output has NO <|...|> markers at all — the channel names survive as bare
+# lowercase words glued straight onto the surrounding text:
+#     "analysisWe need to fix…assistantfinalCorrected text."
+# The answer follows the glued "assistantfinal" marker; a leading bare CoT
+# channel name with no such marker means the answer never made it out.
+# Both patterns are deliberately strict (case-sensitive, glued to the next
+# character) so ordinary prose starting with "Analysis …" is never touched.
+_PLAIN_FINAL_MARK   = "assistantfinal"
+_PLAIN_COT_OPEN_RE  = re.compile(r"^\s*(?:analysis|commentary)\S")
+
 
 def _strip_channels(text: str) -> str:
     """Remove harmony channel scaffolding, keeping only the answer text.
@@ -67,6 +80,15 @@ def _strip_channels(text: str) -> str:
          called "thought").
     """
     if "<|" not in text and "|>" not in text:
+        # No markers left — either a clean answer, or a detokenised Harmony
+        # leak (see _PLAIN_FINAL_MARK above). Keep what follows the LAST glued
+        # "assistantfinal"; a bare CoT channel opener with no final marker
+        # means the answer was truncated mid-reasoning -> return "" so the
+        # safety layer falls back to the original text.
+        if _PLAIN_FINAL_MARK in text:
+            return text.rsplit(_PLAIN_FINAL_MARK, 1)[1].strip()
+        if _PLAIN_COT_OPEN_RE.match(text):
+            return ""
         return text
 
     finals = list(_FINAL_HDR_RE.finditer(text))
@@ -164,6 +186,9 @@ def _maybe_flag_reasoning_model(raw: str) -> None:
     if not _backend.reasoning_detected and (
         _THINK_OPEN_RE.search(raw) or _THINK_CLOSE_RE.search(raw)
         or _THOUGHT_END_RE.search(raw)
+        # Detokenised Harmony leak: gpt-oss reasoning with the special tokens
+        # stripped still burns output tokens, so the budget must activate.
+        or _PLAIN_FINAL_MARK in raw or _PLAIN_COT_OPEN_RE.match(raw)
     ):
         # A bare closing tag (no opening one) is the DeepSeek-R1 signature:
         # the open tag lives in the prompt, so we must detect on </think> too,
@@ -198,6 +223,11 @@ def _streaming_answer(raw: str) -> tuple:
     finals = list(_FINAL_HDR_RE.finditer(raw))
     if finals:
         boundary = max(boundary or 0, finals[-1].end())
+    # Detokenised Harmony leak: the glued "assistantfinal" marker is the
+    # reasoning/answer boundary when special tokens were dropped.
+    plain_final = raw.rfind(_PLAIN_FINAL_MARK)
+    if plain_final != -1:
+        boundary = max(boundary or 0, plain_final + len(_PLAIN_FINAL_MARK))
 
     if boundary is not None:
         answer = _strip_reasoning(raw[boundary:])
@@ -205,7 +235,7 @@ def _streaming_answer(raw: str) -> tuple:
 
     # No boundary yet. If we can SEE a reasoning opener, we're mid-reasoning.
     if (_THINK_OPEN_RE.search(raw) or _THOUGHT_OPEN_RE.search(raw)
-            or _CHANNEL_HDR_RE.search(raw)):
+            or _CHANNEL_HDR_RE.search(raw) or _PLAIN_COT_OPEN_RE.match(raw)):
         return "", True
 
     # No markers at all. Only assume "still reasoning" when a reasoning model was

@@ -1,13 +1,17 @@
-"""Bottom bar: status label and the Save & Connect flow."""
+"""Bottom bar: status label and the Connect flow.
+
+Behaviour, Assistant, and Appearance settings apply and persist the moment
+they are changed in their own tabs. This bar only handles the connection
+settings (Model tab), which need an explicit action: loading a model or
+connecting to a server/cloud/CLI backend is slow and can fail."""
 
 import threading
 import tkinter as tk
 
-from .. import constants as c
 from .. import llm
 from .. import diagnostics
 from ..llm import connect_server, connect_cloud, connect_cli
-from ..config import save_cfg, _merge_custom_modes
+from ..config import save_cfg
 from ..constants import (
     BG, SURF2, ACCENT, ACCENT2, WARN, ERR, SUCCESS,
     FONT_B, FONT_SIZE_OFFSET,
@@ -17,7 +21,7 @@ from ..ui_thread import _ui_call
 
 def _build_bottom_bar(ui):
     """Build the always-visible bottom bar: status label and the
-    Save & Connect button with the full save_and_load flow."""
+    Connect button with the connection save_and_load flow."""
     win, cfg = ui.win, ui.cfg
     on_cfg_saved, on_model_loaded = ui.on_cfg_saved, ui.on_model_loaded
     bottom_bar = ui.bottom_bar
@@ -30,20 +34,9 @@ def _build_bottom_bar(ui):
     _cloud_keys, _favorites = ui.cloud_keys, ui.favorites
     _remember_provider_key = ui.remember_provider_key
     cli_enabled_var, cli_model_var = ui.cli_enabled_var, ui.cli_model_var
-    cli_effort_var, cli_spell_var = ui.cli_effort_var, ui.cli_spell_var
+    cli_effort_var = ui.cli_effort_var
     _cli_effort_value = ui.cli_effort_value
     fmt_var, gpu_var, ctx_var = ui.fmt_var, ui.gpu_var, ui.ctx_var
-    lang_var, sc_mode_var, diacr_var = ui.lang_var, ui.sc_mode_var, ui.diacr_var
-    _trig_string = ui.trig_string
-    min_var, idle_var = ui.min_var, ui.idle_var
-    understand_hotkey_var = ui.understand_hotkey_var
-    writing_hotkey_var = ui.writing_hotkey_var
-    reading_rephrase_var, writing_rephrase_var = ui.reading_rephrase_var, ui.writing_rephrase_var
-    creativity_var = ui.creativity_var
-    _custom, _builtin_overrides = ui.custom, ui.builtin_overrides
-    _mode_triggers, _mode_hotkeys = ui.mode_triggers, ui.mode_hotkeys
-    active_scheme_var, font_size_var = ui.active_scheme_var, ui.font_size_var
-    FONT_SIZE_MAP = ui.FONT_SIZE_MAP
 
     # Show the live backend if one is already connected ("None" = not connected).
     _backend_now = llm._backend.label or ""
@@ -56,6 +49,57 @@ def _build_bottom_bar(ui):
              bg=BG, fg=SURF2).pack(pady=(0, 2))
     status.pack(pady=(0, 6))
     win.status_lbl = status
+
+    def _pending_connection_cfg() -> dict:
+        """The connection values as currently shown in the Model tab — exactly
+        what pressing Connect would write into cfg. Shared by the save flow
+        and the unsaved-changes indicator so the two can never disagree."""
+        mode = backend_var.get()
+        return {
+            "backend_mode": mode,
+            "model_path": model_var.get() if mode == "local" else "",
+            "server_url": server_url_var.get().strip() if mode == "server" else "",
+            "cloud_provider": cloud_provider_var.get(),
+            "cloud_base_url": cloud_url_var.get().strip(),
+            "cloud_api_key": cloud_key_var.get().strip(),
+            "cloud_model": cloud_model_var.get().strip(),
+            "cli_models_enabled": bool(cli_enabled_var.get()),
+            "cli_model": cli_model_var.get().strip(),
+            "cli_reasoning_effort": _cli_effort_value(),
+            "remember_cloud_api_key": bool(remember_key_var.get()),
+            "auto_detect_server": autodetect_var.get(),
+            "server_disable_thinking": nothink_var.get(),
+            "prompt_format": fmt_var.get(),
+            "gpu_acceleration": gpu_var.get(),
+            "n_ctx": ctx_var.get(),
+        }
+
+    def _connection_dirty() -> bool:
+        try:
+            pending = _pending_connection_cfg()
+        except tk.TclError:
+            # A numeric entry is mid-edit (e.g. blank n_ctx) — that's unsaved.
+            return True
+        return any(cfg.get(key) != value for key, value in pending.items())
+
+    _dirty_shown = [False]
+
+    def _refresh_dirty_indicator(*_args):
+        if _connection_dirty():
+            _dirty_shown[0] = True
+            status.config(
+                text="Connection changes not applied yet — click Connect.",
+                fg=WARN,
+            )
+        elif _dirty_shown[0]:
+            # Values match the saved config again — clear our own warning,
+            # without clobbering texts other flows put there.
+            _dirty_shown[0] = False
+            label = llm._backend.label or ""
+            status.config(
+                text=f"Ready ✓ ({label})" if label and label != "None" else "",
+                fg=SUCCESS,
+            )
 
     def save_and_load():
         # Persist the chosen backend. Clear the inactive local/server values so the
@@ -96,61 +140,20 @@ def _build_bottom_bar(ui):
             old_n_ctx != ctx_var.get()
         )
 
-        cfg["backend_mode"]           = mode
-        cfg["model_path"]             = model_var.get() if mode == "local" else ""
-        cfg["server_url"]             = server_url_var.get().strip() if mode == "server" else ""
-        cfg["cloud_provider"]         = cloud_provider_var.get()
-        cfg["cloud_base_url"]         = cloud_url_var.get().strip()
-        cfg["cloud_api_key"]          = cloud_key_var.get().strip()
-        cfg["cloud_model"]            = cloud_model_var.get().strip()
-        cfg["cli_models_enabled"]     = bool(cli_enabled_var.get())
-        cfg["cli_model"]              = cli_model_var.get().strip()
-        cfg["cli_reasoning_effort"]   = _cli_effort_value()
-        cfg["cli_spell_check_enabled"] = bool(
-            cli_enabled_var.get() and cli_spell_var.get()
-        )
-        cfg["remember_cloud_api_key"] = bool(remember_key_var.get())
+        cfg.update(_pending_connection_cfg())
         # Keep provider keys in memory for this run; save_cfg strips secrets from disk.
         _remember_provider_key(cloud_provider_var.get(), cloud_key_var.get().strip())
         cfg["cloud_api_keys"]         = dict(_cloud_keys)
         cfg["cloud_favorites"]        = [dict(f) for f in _favorites]
         use_server = mode == "server"
-        cfg["auto_detect_server"]     = autodetect_var.get()
-        cfg["server_disable_thinking"] = nothink_var.get()
         # Apply live so the change takes effect without reconnecting the server.
         llm._backend.server_disable_thinking = bool(nothink_var.get())
-        cfg["prompt_format"]          = fmt_var.get()
-        cfg["gpu_acceleration"]       = gpu_var.get()
-        cfg["working_language"]       = lang_var.get()
-        cfg["trigger_chars"]          = _trig_string()
-        cfg["min_word_count"]         = min_var.get()
-        cfg["idle_reset_sec"]         = idle_var.get()
-        cfg["spell_check_mode"]       = sc_mode_var.get()
-        cfg["diacritics_only_auto"]   = diacr_var.get()
-        cfg["understand_hotkey"]      = understand_hotkey_var.get()
-        cfg["writing_hotkey"]         = writing_hotkey_var.get()
-        cfg["rephrase_reading_mode"]  = reading_rephrase_var.get()
-        cfg["rephrase_writing_mode"]  = writing_rephrase_var.get()
-        cfg["rephrase_creativity"]    = creativity_var.get() / 100
-        cfg["n_ctx"]                  = ctx_var.get()
-        cfg["colour_scheme"]          = active_scheme_var.get()
-        cfg.pop("colour_scheme_slots", None)
-
-        old_offset = cfg.get("font_size_offset", 0)
-        new_offset = FONT_SIZE_MAP.get(font_size_var.get(), 0)
-        cfg["font_size_offset"]       = new_offset
-
-        cfg["custom_rephrase_modes"]    = dict(_custom)
-        cfg["builtin_prompt_overrides"] = dict(_builtin_overrides)
-        cfg["mode_triggers"]            = dict(_mode_triggers)
-        cfg["mode_hotkeys"]             = dict(_mode_hotkeys)
-        _merge_custom_modes(cfg)
+        _dirty_shown[0] = False
         diagnostics.set_status(
             enabled=cfg.get("enabled", True),
-            spell_check_mode=cfg.get("spell_check_mode", "Auto"),
             backend_mode=cfg.get("backend_mode", "local"),
         )
-        diagnostics.record("config", "info", "Settings save requested.")
+        diagnostics.record("config", "info", "Connection settings save requested.")
         save_cfg(cfg)
         on_cfg_saved(cfg)
 
@@ -193,28 +196,30 @@ def _build_bottom_bar(ui):
                         active_win.status_lbl.config(text=f"Error: {m}", fg=ERR)
                 _ui_call(_refresh_err, wait=False)
 
-        if new_offset != old_offset:
-            global FONT_SIZE_OFFSET
-            FONT_SIZE_OFFSET = new_offset
-            c.apply_font_size(new_offset)
-            ui.reopen()
-            if model_changed:
-                threading.Thread(target=_load, daemon=True).start()
-            return
-
         if model_changed:
             status.config(
-                text={"cli": "Saved. Selecting command-line model…",
-                      "cloud": "Saved. Connecting to cloud API…",
-                      "server": "Saved. Connecting to server…"}.get(mode, "Saved. Loading model…"),
+                text={"cli": "Selecting command-line model…",
+                      "cloud": "Connecting to cloud API…",
+                      "server": "Connecting to server…"}.get(mode, "Loading model…"),
                 fg=WARN,
             )
             threading.Thread(target=_load, daemon=True).start()
         else:
-            status.config(text="Saved.", fg=SUCCESS)
+            status.config(text="Connection settings unchanged.", fg=SUCCESS)
 
-    tk.Button(bottom_bar, text="\u221e  Save & Connect",
+    tk.Button(bottom_bar, text="\u221e  Connect",
               font=("Georgia", 12 + FONT_SIZE_OFFSET, "bold"),
               bg=ACCENT, fg="white", activebackground=ACCENT2, activeforeground="white",
               relief="flat", padx=44, pady=9, cursor="hand2",
               command=save_and_load).pack()
+
+    # Live unsaved-changes indicator: any edit to a connection setting flips
+    # the status line to a warning until Connect is pressed (or the value is
+    # reverted). Behaviour/Assistant/Appearance settings save themselves, so
+    # the Model tab is the only place changes can sit unapplied.
+    for _var in (backend_var, model_var, server_url_var, autodetect_var,
+                 nothink_var, cloud_provider_var, cloud_url_var, cloud_key_var,
+                 cloud_model_var, remember_key_var, cli_enabled_var,
+                 cli_model_var, cli_effort_var, fmt_var, gpu_var, ctx_var):
+        _var.trace_add("write", _refresh_dirty_indicator)
+    _refresh_dirty_indicator()

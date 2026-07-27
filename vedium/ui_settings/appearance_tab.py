@@ -90,6 +90,18 @@ def _build_appearance_tab(ui):
     font_dd.grid(row=0, column=1, sticky="w")
     _bind_scroll(font_dd)
 
+    def _apply_font_choice(_event=None):
+        new_offset = FONT_SIZE_MAP.get(font_size_var.get(), 0)
+        if cfg.get("font_size_offset", 0) == new_offset:
+            return
+        cfg["font_size_offset"] = new_offset
+        save_cfg(cfg)
+        c.apply_font_size(new_offset)
+        # Rebuild the window so every widget picks up the new base size —
+        # same flow the theme picker uses.
+        ui.reopen()
+
+    font_dd.bind("<<ComboboxSelected>>", _apply_font_choice)
+
     # ── publish shared state ──────────────────────────────────────────────────
     ui.active_scheme_var, ui.font_size_var = active_scheme_var, font_size_var
-    ui.FONT_SIZE_MAP = FONT_SIZE_MAP

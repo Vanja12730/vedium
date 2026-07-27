@@ -93,13 +93,41 @@ def test_codex_discovery_default_and_fallback():
     assert cli_models.codex_default_model(tmp) == ""
 
 
+def test_antigravity_models_come_from_the_cli_and_are_cached():
+    listed = "gemini-3.6-flash-high\n\ngemini-3.6-flash-low\nGPT-OSS 120B (Medium)\n"
+    done = subprocess.CompletedProcess([], 0, stdout=listed, stderr="")
+    with mock.patch.object(cli_models, "_agy_models_cache", None), \
+            mock.patch.object(cli_models.subprocess, "run", return_value=done) as run:
+        assert cli_models.discover_antigravity_models(r"C:\bin\agy.exe") == [
+            "gemini-3.6-flash-high", "gemini-3.6-flash-low", "GPT-OSS 120B (Medium)",
+        ]
+        assert run.call_args.args[0] == [r"C:\bin\agy.exe", "models"]
+        # Second call is served from the cache; refresh=True re-runs the CLI.
+        cli_models.discover_antigravity_models(r"C:\bin\agy.exe")
+        assert run.call_count == 1
+        cli_models.discover_antigravity_models(r"C:\bin\agy.exe", refresh=True)
+        assert run.call_count == 2
+
+    # A CLI that cannot answer yields no models, and is not cached as empty.
+    failed = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
+    with mock.patch.object(cli_models, "_agy_models_cache", None), \
+            mock.patch.object(cli_models.subprocess, "run", return_value=failed):
+        assert cli_models.discover_antigravity_models(r"C:\bin\agy.exe") == []
+    with mock.patch.object(cli_models, "_agy_models_cache", None), \
+            mock.patch.object(cli_models.subprocess, "run", side_effect=OSError):
+        assert cli_models.discover_antigravity_models(r"C:\bin\agy.exe") == []
+
+
 def test_detection_and_disabled_selection():
     def resolve(name):
         return fr"C:\bin\{name}.cmd"
 
+    agy_listed = ["gemini-3.6-flash-low", "Claude Opus 4.6 (Thinking)"]
     with tempfile.TemporaryDirectory() as tmp, \
             mock.patch.object(cli_models, "resolve_cli", side_effect=resolve), \
             mock.patch.object(cli_models, "discover_codex_models", return_value=[]), \
+            mock.patch.object(cli_models, "discover_antigravity_models",
+                              return_value=agy_listed), \
             mock.patch.object(cli_models, "codex_default_model", return_value="gpt-default"):
         detected = cli_models.detect_clis(tmp)
         assert detected["claude"]["models"][0]["id"] == "claude-sonnet"
@@ -114,16 +142,18 @@ def test_detection_and_disabled_selection():
             "efforts": [],
             "agy_model": "",
         }
-        assert detected["antigravity"]["models"][3] == {
-            "id": "agy-gemini-3.5-flash-low",
-            "label": "Gemini 3.5 Flash (Low) (Antigravity CLI)",
+        # A slug is passed through untouched; a display label is still slugified
+        # into an id, so ids stay stable across the agy naming change.
+        assert detected["antigravity"]["models"][1] == {
+            "id": "agy-gemini-3.6-flash-low",
+            "label": "gemini-3.6-flash-low (Antigravity CLI)",
             "efforts": [],
-            "agy_model": "Gemini 3.5 Flash (Low)",
+            "agy_model": "gemini-3.6-flash-low",
         }
+        assert detected["antigravity"]["models"][2]["id"] == "agy-claude-opus-4.6-thinking"
         assert cli_models.selectable_models(False, tmp) == []
         assert len(cli_models.selectable_models(True, tmp)) == (
-            len(cli_models.CLAUDE_ALIASES) + 1
-            + 1 + len(cli_models.ANTIGRAVITY_MODELS)
+            len(cli_models.CLAUDE_ALIASES) + 1 + 1 + len(agy_listed)
         )
 
 
@@ -254,7 +284,7 @@ def test_run_codex_timeout_cleans_output():
 
 
 def test_run_agy_command_and_log_verification():
-    label = "Gemini 3.5 Flash (Low)"
+    label = "Gemini 3.6 Flash (Low)"
     seen = {}
 
     def fake_run(command, **kwargs):
@@ -272,15 +302,17 @@ def test_run_agy_command_and_log_verification():
     with tempfile.TemporaryDirectory() as cwd, mock.patch.object(
         cli_models.subprocess, "run", side_effect=fake_run
     ):
+        # agy 1.1.5 is asked by slug but still names the model in its log by
+        # display label, which is what the user should see as provenance.
         text, served = cli_models.run_agy(
-            r"C:\agy\agy.exe", label, "System", "Prompt", cwd
+            r"C:\agy\agy.exe", "gemini-3.6-flash-low", "System", "Prompt", cwd
         )
         assert (text, served) == ("pong", label)
         command = seen["command"]
         assert command[0] == r"C:\agy\agy.exe"
         assert command[command.index("-p") + 1] == "[Instructions]\nSystem\n\nPrompt"
         assert command[command.index("--mode") + 1] == "plan"
-        assert command[command.index("--model") + 1] == label
+        assert command[command.index("--model") + 1] == "gemini-3.6-flash-low"
         assert Path(command[command.index("--log-file") + 1]).parent == Path(cwd)
         assert seen["kwargs"]["input"] == ""
         assert seen["kwargs"]["cwd"] == cwd
@@ -320,25 +352,31 @@ def test_run_agy_rejects_silent_model_substitution():
 
 
 def test_converse_routes_antigravity_models():
+    listed = ["gemini-3.6-flash-low"]
     with mock.patch.object(cli_models, "resolve_cli", return_value="agy.exe"), \
+            mock.patch.object(cli_models, "discover_antigravity_models",
+                              return_value=listed), \
             mock.patch.object(
                 cli_models, "run_agy",
-                return_value=("pong", "Gemini 3.5 Flash (Low)"),
+                return_value=("pong", "Gemini 3.6 Flash (Low)"),
             ) as run:
         text, provenance = cli_models.converse(
-            "agy-gemini-3.5-flash-low",
+            "agy-gemini-3.6-flash-low",
             [{"role": "user", "content": "Reply pong"}],
             enabled=True,
         )
     assert text == "pong"
     assert provenance == {
         "runner": "Antigravity CLI",
-        "model": "Gemini 3.5 Flash (Low)",
+        "model": "Gemini 3.6 Flash (Low)",
         "effort": "",
     }
-    assert run.call_args.args[1] == "Gemini 3.5 Flash (Low)"
+    # The CLI is driven with the exact name it listed, not a reconstructed one.
+    assert run.call_args.args[1] == "gemini-3.6-flash-low"
 
-    with mock.patch.object(cli_models, "resolve_cli", return_value="agy.exe"):
+    with mock.patch.object(cli_models, "resolve_cli", return_value="agy.exe"), \
+            mock.patch.object(cli_models, "discover_antigravity_models",
+                              return_value=listed):
         try:
             cli_models.converse(
                 "agy-never-heard-of-it", [{"role": "user", "content": "x"}],
@@ -415,6 +453,7 @@ def main() -> int:
         test_run_claude_error_paths,
         test_run_codex_command_output_and_cleanup,
         test_run_codex_timeout_cleans_output,
+        test_antigravity_models_come_from_the_cli_and_are_cached,
         test_run_agy_command_and_log_verification,
         test_run_agy_rejects_silent_model_substitution,
         test_converse_routes_antigravity_models,

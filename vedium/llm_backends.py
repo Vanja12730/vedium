@@ -39,7 +39,7 @@ def _make_llama(path: str, *, use_gpu: bool, n_ctx: int = 768):
 
     kwargs = {
         "model_path": path,
-        "n_ctx":      n_ctx,  # configurable via Settings; default 768
+        "n_ctx":      n_ctx,  # configurable via Settings; default 4096
                               # (system ~150 tokens + sentence ~80 + output ~100 = ~330 peak)
                               # raise to 2048-4096 for long selected-text rephrases
         "n_batch":    128,    # smaller batch = less prefill overhead for short prompts
@@ -1219,7 +1219,7 @@ def load_model(path: str):
     cfg = load_cfg()
     gpu_mode = cfg.get("gpu_acceleration", "Auto")
     wants_gpu = gpu_mode in ("Auto", "Full")
-    n_ctx     = int(cfg.get("n_ctx", 768))
+    n_ctx     = int(cfg.get("n_ctx", 4096))
 
     if not wants_gpu:
         print("[Vedium] GPU acceleration disabled — loading on CPU.", file=sys.stderr)

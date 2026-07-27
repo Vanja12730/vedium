@@ -13,7 +13,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 # Import the package under test.  These are white-box tests, so they reach into
 # the submodules directly rather than through a package-level facade.
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from spell_daemon import (
+from vedium import (
     buffer,
     config,
     constants,
@@ -34,36 +34,70 @@ def report(test_id, status, note=""):
     test_results[test_id] = {"status": status, "note": clean_note}
 
 
-print("Initializing Cloud client...")
+# Backend selection: default is the cloud candidates below; pass --cli to run
+# against the Antigravity CLI instead (no rate limits, so no skipped tests).
+# An id after --cli overrides the model, e.g.:  --cli agy-gemini-3.1-pro-low
+USE_CLI = "--cli" in sys.argv
+CLI_MODEL = "agy-gemini-3.5-flash-medium"
+if USE_CLI:
+    _cli_pos = sys.argv.index("--cli")
+    if _cli_pos + 1 < len(sys.argv) and not sys.argv[_cli_pos + 1].startswith("-"):
+        CLI_MODEL = sys.argv[_cli_pos + 1]
+
 cfg = config.load_cfg()
-api_key = cfg.get("cloud_api_key")
-base_url = cfg.get("cloud_base_url")
-
-# Let's try favorites first, starting with gemma-4-31b-it
-model_candidates = [
-    ("https://generativelanguage.googleapis.com/v1beta/openai", "gemma-4-31b-it"),
-    ("https://generativelanguage.googleapis.com/v1beta/openai", "gemma-4-26b-a4b-it"),
-]
-
 connected = False
-for b_url, m_name in model_candidates:
+
+if USE_CLI:
+    print(f"Initializing CLI backend ({CLI_MODEL})...")
     try:
-        print(f"Attempting to connect to {m_name}...")
-        llm.connect_cloud(b_url, api_key, m_name)
-        model = m_name
-        print(f"Connected successfully to model {m_name}")
+        label = llm.connect_cli(CLI_MODEL, True)
+        model = CLI_MODEL
+        print(f"Connected successfully: {label}")
         connected = True
-        break
     except Exception as e:
-        print(f"Failed to connect to {m_name}: {e}")
+        print(f"Failed to select CLI model {CLI_MODEL}: {e}")
+else:
+    print("Initializing Cloud client...")
+    api_key = cfg.get("cloud_api_key")
+    base_url = cfg.get("cloud_base_url")
+
+    # Let's try favorites first, starting with gemma-4-31b-it
+    model_candidates = [
+        ("https://generativelanguage.googleapis.com/v1beta/openai", "gemma-4-31b-it"),
+        ("https://generativelanguage.googleapis.com/v1beta/openai", "gemma-4-26b-a4b-it"),
+    ]
+
+    for b_url, m_name in model_candidates:
+        try:
+            print(f"Attempting to connect to {m_name}...")
+            llm.connect_cloud(b_url, api_key, m_name)
+            model = m_name
+            print(f"Connected successfully to model {m_name}")
+            connected = True
+            break
+        except Exception as e:
+            print(f"Failed to connect to {m_name}: {e}")
 
 if not connected:
     print("COULD NOT CONNECT TO ANY LLM MODEL. ABORTING TEST.")
     sys.exit(1)
 
 def call_llm_safe(prompt, max_tokens=100, temperature=0.1, stop=None):
-    time.sleep(2.0) # sleep to avoid rate limits
-    return llm._llm(prompt, max_tokens=max_tokens, temperature=temperature, stop=stop)
+    """Run one completion on whichever backend is connected.
+
+    _complete_prompt routes to the CLI client (which needs semantic messages,
+    recovered from the templated prompt) or calls the cloud/local client with
+    the prompt directly.
+    """
+    if not USE_CLI:
+        time.sleep(2.0)  # sleep to avoid cloud rate limits
+    return llm._complete_prompt(
+        prompt,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop,
+        messages=llm._prompt_to_messages(prompt),
+    )
 
 # ---------------------------------------------------------
 # T13: Post-Trigger Typing

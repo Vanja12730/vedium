@@ -25,6 +25,22 @@ from ..ui_thread import _ui_call
 from ..ui_widgets import _add_tooltip, _make_toggle, lbl_row, _TGL_INDENT
 
 
+_CLI_TITLES = (
+    ("claude", "Claude Code"),
+    ("codex", "Codex CLI"),
+    ("antigravity", "Antigravity CLI"),
+)
+
+
+def _empty_cli_detection():
+    """Shape returned when detection itself fails, so the panel still renders."""
+    return {
+        "claude": {"path": None, "models": []},
+        "codex": {"path": None, "models": [], "default_model": ""},
+        "antigravity": {"path": None, "models": []},
+    }
+
+
 def _build_model_tab(ui):
     """Build the Model tab: backend choice, local/server/cloud panels,
     prompt format, GPU mode, and context size."""
@@ -499,8 +515,9 @@ def _build_model_tab(ui):
     ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     # ── Show/hide sub-panels based on radio selection ─────────────────────────
-    # Command-line AI sub-panel. Detection is local/free and reruns whenever a
-    # new Settings window is constructed.
+    # Command-line AI sub-panel. Detection is local and free: each installed CLI
+    # is asked for its own model list, so a CLI update brings its new models
+    # along without an app change.
     cli_frame = tk.Frame(mf, bg=BG)
     cli_frame.columnconfigure(1, weight=1)
     cli_enabled_var = tk.BooleanVar(master=win, value=cfg.get("cli_models_enabled", False))
@@ -508,50 +525,43 @@ def _build_model_tab(ui):
     cli_effort_var = tk.StringVar(
         master=win, value=cfg.get("cli_reasoning_effort", "") or "Default"
     )
-    cli_spell_var = tk.BooleanVar(
-        master=win,
-        value=bool(
-            cfg.get("cli_models_enabled", False)
-            and cfg.get("cli_spell_check_enabled", False)
-        ),
-    )
     cli_status_var = tk.StringVar(master=win, value="")
 
+    # Detection is synchronous here because the Setup tab binds cli_model_ids
+    # while this tab is being built. Listing Antigravity's models costs one
+    # ~2.5s `agy models` call, cached for the rest of the run; Refresh below
+    # re-runs it off the UI thread.
     try:
         cli_detection = detect_clis()
     except Exception as exc:
         diagnostics.record("backend", "error", "AI CLI detection failed.", str(exc))
-        cli_detection = {
-            "claude": {"path": None, "models": []},
-            "codex": {"path": None, "models": [], "default_model": ""},
-            "antigravity": {"path": None, "models": []},
-        }
-    cli_models = (
-        cli_detection["claude"]["models"]
-        + cli_detection["codex"]["models"]
-        + cli_detection["antigravity"]["models"]
-    )
-    cli_model_ids = [entry["id"] for entry in cli_models]
+        cli_detection = _empty_cli_detection()
+    # Shared with the Setup tab, which binds this list once at build time, so
+    # Refresh must mutate it in place rather than rebind it.
+    cli_model_ids: list[str] = []
+    cli_refreshing = [False]
 
     cli_main_toggle = None
-    cli_spell_toggle = None
     cli_model_cb = None
     cli_effort_cb = None
     cli_status_lbl = None
+    cli_refresh_btn = None
+    cli_found_lbls = {}
 
     def _refresh_cli_controls():
         enabled = bool(cli_enabled_var.get())
-        if not enabled and cli_spell_var.get():
-            cli_spell_var.set(False)
         cli_model_cb.config(
             values=cli_model_ids if enabled else [],
             state="readonly" if enabled and cli_model_ids else "disabled",
         )
         cli_effort_cb.config(state="readonly" if enabled else "disabled")
-        cli_spell_toggle.set_state("normal" if enabled else "disabled")
+        cli_refresh_btn.config(state="disabled" if cli_refreshing[0] else "normal")
 
         selected = cli_model_var.get().strip()
-        if not enabled:
+        if cli_refreshing[0]:
+            cli_status_var.set("Asking each installed CLI which models it can run…")
+            cli_status_lbl.config(fg=MUTED)
+        elif not enabled:
             cli_status_var.set("Command-line models are switched off.")
             cli_status_lbl.config(fg=MUTED)
         elif not cli_model_ids:
@@ -564,7 +574,7 @@ def _build_model_tab(ui):
             cli_status_var.set(f"Saved model is not currently available: {selected}")
             cli_status_lbl.config(fg=ERR)
         else:
-            cli_status_var.set(f"Ready to select {selected} on Save & Connect.")
+            cli_status_var.set(f"Ready to select {selected} on Connect.")
             cli_status_lbl.config(fg=SUCCESS)
 
     def _on_cli_enabled_toggle():
@@ -582,28 +592,6 @@ def _build_model_tab(ui):
                 cli_enabled_var.set(False)
             else:
                 diagnostics.record("config", "info", "AI CLI models enabled with consent.")
-        else:
-            cli_spell_var.set(False)
-        _refresh_cli_controls()
-
-    def _on_cli_spell_toggle():
-        if cli_spell_var.get():
-            allowed = messagebox.askokcancel(
-                "Enable automatic CLI spell-check?",
-                "Vedium will send an AI CLI subscription request whenever "
-                "you complete a sentence with configured punctuation. This can "
-                "spend usage repeatedly while you type, and each result may take "
-                "many seconds. Slow results are shown for review instead of being "
-                "replaced automatically.\n\nEnable automatic CLI spell-check?",
-                parent=win,
-                icon="warning",
-            )
-            if not allowed:
-                cli_spell_var.set(False)
-            else:
-                diagnostics.record(
-                    "config", "warning", "Automatic CLI spell-check enabled with consent."
-                )
         _refresh_cli_controls()
 
     cli_main_toggle = _make_toggle(
@@ -617,40 +605,33 @@ def _build_model_tab(ui):
         font=("Segoe UI", 8), bg=BG, fg=WARN, wraplength=500, justify="left",
     ).grid(row=1, column=0, columnspan=2, sticky="w", padx=(_TGL_INDENT, 0), pady=(2, 7))
 
-    for row, (key, title) in enumerate((
-        ("claude", "Claude Code"),
-        ("codex", "Codex CLI"),
-        ("antigravity", "Antigravity CLI"),
-    ), start=2):
-        info = cli_detection[key]
-        path = info.get("path")
-        count = len(info.get("models", []))
-        if path:
-            suffix = f"found - {count} model{'s' if count != 1 else ''}"
-            if key == "codex" and info.get("default_model"):
-                suffix += f"; default {info['default_model']}"
-            colour = SUCCESS
-        else:
-            suffix = "not found on PATH - install the CLI and sign in once in your terminal"
-            colour = MUTED
-        detected_lbl = tk.Label(
-            cli_frame, text=f"{title}: {suffix}", font=("Segoe UI", 8),
-            bg=BG, fg=colour, anchor="w", justify="left", wraplength=500,
+    for row, (key, _title) in enumerate(_CLI_TITLES, start=2):
+        cli_found_lbls[key] = tk.Label(
+            cli_frame, text="", font=("Segoe UI", 8),
+            bg=BG, fg=MUTED, anchor="w", justify="left", wraplength=500,
         )
-        detected_lbl.grid(row=row, column=0, columnspan=2, sticky="w", pady=1)
-        _add_tooltip(
-            detected_lbl,
-            str(path) if path else "Install the CLI and sign in once in your own terminal.",
-        )
+        cli_found_lbls[key].grid(row=row, column=0, columnspan=2, sticky="w", pady=1)
 
     tk.Label(cli_frame, text="Model", font=("Segoe UI", 9), bg=BG, fg=MUTED).grid(
         row=5, column=0, sticky="w", padx=(0, 8), pady=(8, 3)
     )
+    modelrow_cli = tk.Frame(cli_frame, bg=BG)
+    modelrow_cli.grid(row=5, column=1, sticky="ew", pady=(8, 3))
+    modelrow_cli.columnconfigure(0, weight=1)
     cli_model_cb = ttk.Combobox(
-        cli_frame, textvariable=cli_model_var, values=[], state="disabled", font=FONT_B,
+        modelrow_cli, textvariable=cli_model_var, values=[], state="disabled",
+        font=FONT_B,
     )
-    cli_model_cb.grid(row=5, column=1, sticky="ew", pady=(8, 3))
+    cli_model_cb.grid(row=0, column=0, sticky="ew", padx=(0, 6))
     _bind_scroll(cli_model_cb)
+    cli_refresh_btn = tk.Button(modelrow_cli, text="↻ Refresh", font=FONT_B,
+                                bg=SURF2, fg=TEXT, relief="flat", cursor="hand2")
+    cli_refresh_btn.grid(row=0, column=1)
+    _add_tooltip(
+        cli_refresh_btn,
+        "Re-ask each installed CLI for its model list. Use this after updating a "
+        "CLI so models it added show up without restarting Vedium.",
+    )
 
     tk.Label(cli_frame, text="Reasoning effort", font=("Segoe UI", 9), bg=BG, fg=MUTED).grid(
         row=6, column=0, sticky="w", padx=(0, 8), pady=3
@@ -662,23 +643,71 @@ def _build_model_tab(ui):
     cli_effort_cb.grid(row=6, column=1, sticky="w", pady=3)
     _bind_scroll(cli_effort_cb)
 
-    cli_spell_toggle = _make_toggle(
-        cli_frame, cli_spell_var, "Allow automatic spell-check with AI CLI",
-        state="disabled", command=_on_cli_spell_toggle,
-    )
-    cli_spell_toggle.grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
     tk.Label(
         cli_frame,
-        text="Default OFF. Manual Understand, Improve Writing, follow-ups, and Chat still work.",
+        text="Automatic spell-check is not available on this backend — it would "
+             "spend a subscription request on every sentence. Manual Understand, "
+             "Improve Writing, follow-ups, and Chat all work.",
         font=("Segoe UI", 8), bg=BG, fg=MUTED, wraplength=500, justify="left",
-    ).grid(row=8, column=0, columnspan=2, sticky="w", padx=(_TGL_INDENT, 0), pady=(2, 0))
+    ).grid(row=7, column=0, columnspan=2, sticky="w", padx=(_TGL_INDENT, 0), pady=(8, 0))
 
     cli_status_lbl = tk.Label(
         cli_frame, textvariable=cli_status_var, font=("Segoe UI", 8), bg=BG, fg=MUTED,
         wraplength=500, justify="left",
     )
     cli_status_lbl.grid(row=9, column=0, columnspan=2, sticky="w", pady=(6, 0))
-    _refresh_cli_controls()
+
+    def _apply_cli_detection(detected):
+        for key, title in _CLI_TITLES:
+            info = detected.get(key, {})
+            path = info.get("path")
+            count = len(info.get("models", []))
+            if path:
+                suffix = f"found - {count} model{'s' if count != 1 else ''}"
+                if key == "codex" and info.get("default_model"):
+                    suffix += f"; default {info['default_model']}"
+                colour = SUCCESS
+            else:
+                suffix = ("not found on PATH - install the CLI and sign in once "
+                          "in your terminal")
+                colour = MUTED
+            lbl = cli_found_lbls[key]
+            lbl.config(text=f"{title}: {suffix}", fg=colour)
+            _add_tooltip(
+                lbl,
+                str(path) if path
+                else "Install the CLI and sign in once in your own terminal.",
+            )
+        cli_model_ids[:] = [
+            entry["id"]
+            for key, _title in _CLI_TITLES
+            for entry in detected.get(key, {}).get("models", [])
+        ]
+        cli_refreshing[0] = False
+        _refresh_cli_controls()
+
+    def _refresh_cli_models():
+        """Re-run detection off the UI thread; each CLI is asked what it can run."""
+        if cli_refreshing[0]:
+            return
+        cli_refreshing[0] = True
+        _refresh_cli_controls()
+
+        def _do():
+            try:
+                detected = detect_clis(refresh=True)
+            except Exception as exc:
+                diagnostics.record("backend", "error",
+                                   "AI CLI model refresh failed.", str(exc))
+                detected = _empty_cli_detection()
+            # The window can be closed while the CLIs are still answering.
+            _ui_call(lambda d=detected: cli_frame.winfo_exists()
+                     and _apply_cli_detection(d), wait=False)
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    cli_refresh_btn.config(command=_refresh_cli_models)
+    _apply_cli_detection(cli_detection)
 
     def _on_backend_switch():
         for f in (local_frame, server_frame, cloud_frame, cli_frame):
@@ -744,7 +773,7 @@ def _build_model_tab(ui):
     win.backend_label_var = backend_label_var
 
     # ── Context size ──────────────────────────────────────────────────────────
-    ctx_var = tk.IntVar(master=win, value=cfg.get("n_ctx", 768))
+    ctx_var = tk.IntVar(master=win, value=cfg.get("n_ctx", 4096))
     lbl_row("Context size", 3, frm_model)
     cf = tk.Frame(frm_model, bg=BG)
     cf.grid(row=3, column=1, sticky="w", pady=7)
@@ -760,8 +789,8 @@ def _build_model_tab(ui):
     _add_tooltip(ctx_cb,
         "Controls how much text the model can read at once (prompt + output combined).\n\n"
         "Think of it as the model's working memory:\n"
-        "  • 768–1024    Normal use — sentence-by-sentence correction\n"
-        "  • 2048–4096   A few paragraphs selected for rephrasing\n"
+        "  • 768–1024    Sentence-by-sentence correction only\n"
+        "  • 2048–4096   Default — a few paragraphs selected for rephrasing\n"
         "  • 8192+        Half a page or more selected at once\n"
         "  • 32768+       Several pages of selected text\n\n"
         "If you select a large block of text and the result looks cut off or garbled,\n"
@@ -780,7 +809,9 @@ def _build_model_tab(ui):
     ui.cloud_keys, ui.favorites = _cloud_keys, _favorites
     ui.remember_provider_key = _remember_provider_key
     ui.cli_enabled_var, ui.cli_model_var = cli_enabled_var, cli_model_var
-    ui.cli_effort_var, ui.cli_spell_var = cli_effort_var, cli_spell_var
-    ui.cli_model_ids = list(cli_model_ids)
+    ui.cli_effort_var = cli_effort_var
+    # The same list object, not a copy: Refresh mutates it in place so the
+    # Setup tab's bound reference stays current.
+    ui.cli_model_ids = cli_model_ids
     ui.cli_effort_value = lambda: "" if cli_effort_var.get() == "Default" else cli_effort_var.get()
     ui.fmt_var, ui.gpu_var, ui.ctx_var = fmt_var, gpu_var, ctx_var

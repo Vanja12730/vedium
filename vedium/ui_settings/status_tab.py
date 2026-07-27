@@ -117,8 +117,8 @@ def _build_status_tab(ui):
             return "Needs setup", "Choose or test a backend in the Model tab.", WARN
         if mode == "Off":
             return "Ready, spell check off", "Turn Writing mode to Toast or Auto to get sentence corrections. Assistant hotkeys still work.", WARN
-        if backend_mode == "cli" and not cfg.get("cli_spell_check_enabled", False):
-            return "Ready, CLI spell check off", "Manual Understand, Improve Writing, follow-ups, and Chat are ready. Automatic CLI spell-check remains off.", SUCCESS
+        if backend_mode == "cli":
+            return "Ready, assistant mode", "Manual Understand, Improve Writing, follow-ups, and Chat are ready. Automatic spell-check is not available on the AI CLI backend.", SUCCESS
         if state.get("busy"):
             return "Working", "Wait for the current correction or rephrase to finish.", ACCENT2
         return "Ready", "Select text to understand it, or use Improve Writing on selected or typed text.", SUCCESS

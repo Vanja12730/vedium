@@ -132,10 +132,15 @@ def _is_translation_mode(mode: str) -> bool:
 
 
 def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", deterministic: bool = False,
-                         diacritics_only: bool = False, cfg: dict | None = None, on_fallback=None) -> str:
+                         diacritics_only: bool = False, cfg: dict | None = None, on_fallback=None) -> str | None:
     """
     Run the loaded LLM on `text` and return the grammar/spelling-corrected result.
-    Returns `text` unchanged if no model is loaded.
+    Returns None when the model was never consulted (no backend connected yet, or
+    the active backend is an AI CLI, which never runs automatic spell-check —
+    per-sentence requests are slow and spend subscription usage) — callers must skip the sentence
+    entirely rather than treat it as "model saw no errors", otherwise the
+    pipeline's deterministic capitalizer fabricates a phantom case-only
+    suggestion from text the model never checked.
     deterministic=False uses temperature-based sampling (faster, slightly varied).
     deterministic=True forces temperature=0.0 (greedy decoding — always picks the
     single most probable token, so output is fully reproducible and consistent).
@@ -154,16 +159,14 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
                 "No AI backend is connected; correction skipped.",
                 cooldown_sec=20.0,
             )
-            return text
-        if isinstance(_backend.client, CLIClient) and not bool(
-            (cfg or {}).get("cli_spell_check_enabled", False)
-        ):
+            return None
+        if isinstance(_backend.client, CLIClient):
             diagnostics.record_throttled(
                 "spell", "info",
-                "Automatic CLI spell-check is off; command-line model request skipped.",
+                "Automatic spell-check is not available with AI CLI backends; correction skipped.",
                 cooldown_sec=20.0,
             )
-            return text
+            return None
 
         lang = (working_language or "Auto").strip()
 

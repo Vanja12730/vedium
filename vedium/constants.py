@@ -43,7 +43,6 @@ DEFAULT_CFG = {
     "cli_models_enabled":     False,
     "cli_model":              "",
     "cli_reasoning_effort":   "",
-    "cli_spell_check_enabled": False,
     "prompt_format":          "ChatML  (Qwen / Phi-3 / Yi)",
     "gpu_acceleration":       "Auto",
     "working_language":       "Auto",
@@ -58,7 +57,7 @@ DEFAULT_CFG = {
     "rephrase_writing_mode":  "Polish My Writing",
     "rephrase_creativity":    0.35,
     "idle_reset_sec":         30.0,
-    "n_ctx":                  768,
+    "n_ctx":                  4096,
     "diacritics_only_auto":    False,
     "colour_scheme":          "Parchment",
     "custom_rephrase_modes":    {},
@@ -163,6 +162,7 @@ FORMATS = [
     "Alpaca / Vicuna",
     "DeepSeek",
     "Command-R  (Cohere)",
+    "Harmony  (gpt-oss)",
     "Plain  (no template)",
 ]
 
@@ -488,6 +488,7 @@ def _detect_format_from_path(path: str) -> str | None:
     name = os.path.basename(path).lower()
 
     rules = [
+        (r"gpt[-_]?oss",                    "Harmony  (gpt-oss)"),
         (r"deepseek",                       "DeepSeek"),
         (r"llama[-_]?3",                    "Llama 3  (Meta)"),
         (r"meta[-_]?llama[-_]?3",           "Llama 3  (Meta)"),

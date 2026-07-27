@@ -26,23 +26,13 @@ CLAUDE_ALIASES = ("sonnet", "opus", "haiku", "fable")
 EFFORT_LEVELS = ("", "low", "medium", "high", "xhigh", "max")
 _EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max", "ultra")
 
-# Copied from `agy models` (Antigravity CLI 1.1.1, 2026-07-11). agy accepts the
-# exact display label as --model, but silently substitutes its default model
-# for any name it does not recognize, so run_agy re-verifies every run against
-# the run log instead of trusting this list.
-ANTIGRAVITY_MODELS = (
-    "Gemini 3.5 Flash (Medium)",
-    "Gemini 3.5 Flash (High)",
-    "Gemini 3.5 Flash (Low)",
-    "Gemini 3.1 Pro (Low)",
-    "Gemini 3.1 Pro (High)",
-    "Claude Sonnet 4.6 (Thinking)",
-    "Claude Opus 4.6 (Thinking)",
-    "GPT-OSS 120B (Medium)",
-)
 # agy receives the prompt as a command-line argument, and Windows caps a
 # command line at 32767 characters.
 _AGY_PROMPT_LIMIT = 30000
+# `agy models` takes ~2.5s, which is too slow to repeat on every detection pass,
+# so its answer is cached for the life of the process.
+_AGY_LIST_TIMEOUT = 30.0
+_agy_models_cache: list[str] | None = None
 
 
 class CLIModelError(RuntimeError):
@@ -112,32 +102,75 @@ def codex_default_model(home: str | Path | None = None) -> str:
     return match.group(1).strip() if match else ""
 
 
-def antigravity_model_entries() -> list[dict]:
-    """Return the static Antigravity model entries plus its default entry."""
+def discover_antigravity_models(path: str, *, refresh: bool = False) -> list[str]:
+    """Ask `agy models` what it can currently run; return [] on any failure.
+
+    Nothing is hard-coded: whatever the installed CLI prints is what the app
+    offers, so an agy update brings its new models along without an app change.
+    agy 1.1.5 prints stable slugs (``gemini-3.6-flash-high``) and accepts them
+    verbatim as ``--model``; older builds printed display labels, which it also
+    still accepts, so either form works unchanged.
+
+    The answer is cached for the life of the process.  Failures are not cached,
+    so a CLI that is briefly unavailable is retried on the next pass.
+    """
+    global _agy_models_cache
+    if _agy_models_cache is not None and not refresh:
+        return list(_agy_models_cache)
+    try:
+        result = subprocess.run(
+            wrap_command(path) + ["models"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_AGY_LIST_TIMEOUT,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    names = [
+        line.strip() for line in str(result.stdout or "").splitlines() if line.strip()
+    ]
+    _agy_models_cache = names
+    return list(names)
+
+
+def antigravity_model_entries(models: list[str] | tuple[str, ...] = ()) -> list[dict]:
+    """Return the Antigravity default entry plus one entry per listed model."""
     entries = [{
         "id": "agy",
         "label": "Antigravity CLI default",
         "efforts": [],
         "agy_model": "",
     }]
-    for label in ANTIGRAVITY_MODELS:
-        slug = re.sub(r"[^a-z0-9.]+", "-", label.lower()).strip("-")
+    for name in models:
+        slug = re.sub(r"[^a-z0-9.]+", "-", name.lower()).strip("-")
         entries.append({
             "id": f"agy-{slug}",
-            "label": f"{label} (Antigravity CLI)",
+            "label": f"{name} (Antigravity CLI)",
             "efforts": [],
-            "agy_model": label,
+            "agy_model": name,
         })
     return entries
 
 
-def detect_clis(home: str | Path | None = None) -> dict:
-    """Return fresh detection and model metadata for the supported CLIs."""
+def detect_clis(home: str | Path | None = None, *, refresh: bool = False) -> dict:
+    """Return fresh detection and model metadata for the supported CLIs.
+
+    ``refresh`` re-runs the cached `agy models` lookup; callers on the UI thread
+    should run this in a worker thread because that lookup spawns a subprocess.
+    """
     claude_path = resolve_cli("claude")
     codex_path = resolve_cli("codex")
     agy_path = resolve_cli("agy")
     codex_models = discover_codex_models(home) if codex_path else []
     default = codex_default_model(home) if codex_path else ""
+    agy_models = (
+        discover_antigravity_models(agy_path, refresh=refresh) if agy_path else []
+    )
     return {
         "claude": {
             "path": claude_path,
@@ -171,7 +204,7 @@ def detect_clis(home: str | Path | None = None) -> dict:
         },
         "antigravity": {
             "path": agy_path,
-            "models": antigravity_model_entries() if agy_path else [],
+            "models": antigravity_model_entries(agy_models) if agy_path else [],
         },
     }
 
@@ -395,9 +428,9 @@ def run_agy(
 ) -> tuple[str, str]:
     """Run Antigravity CLI once and return ``(reply, confirmed_model_label)``.
 
-    ``model_label`` is the exact display label from ``agy models`` (empty for
-    the user's default model). agy has no reasoning-effort flag; the level is
-    part of the model label itself.
+    ``model_label`` is the exact name ``agy models`` printed (empty for the
+    user's default model). agy has no reasoning-effort flag; the level is part
+    of the model name itself.
     """
     if system.strip():
         prompt = f"[Instructions]\n{system}\n\n{prompt}"
@@ -443,19 +476,18 @@ def run_agy(
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         log_text = ""
-    # agy silently substitutes its default model for names it does not
-    # recognize; the run log is the only place the real selection is visible.
-    if model_label:
-        if ("Failed to resolve model flag" in log_text
-                or f'label="{model_label}"' not in log_text):
-            raise CLIModelError(
-                f"Antigravity CLI did not run {model_label!r}. Its model list "
-                "has probably changed; run 'agy models' and reselect the "
-                "model in Settings."
-            )
-        return text, model_label
+    # agy 1.1.5 rejects an unknown --model outright (exit 1 + stderr), which the
+    # returncode check above already catches. Older builds silently substituted
+    # their default and only admitted it in the run log, so that check stays.
+    if model_label and "Failed to resolve model flag" in log_text:
+        raise CLIModelError(
+            f"Antigravity CLI did not run {model_label!r}. Its model list has "
+            "probably changed; click Refresh in Settings and reselect the model."
+        )
+    # The log names the resolved model by its display label even when the run
+    # was requested by slug, so it is the better provenance of the two.
     served = re.findall(r'label="([^"]+)"', log_text)
-    return text, served[-1] if served else ""
+    return text, served[-1] if served else model_label
 
 
 def provenance_footer(provenance: dict) -> str:
@@ -542,17 +574,15 @@ def converse(
                 raise CLIModelError(
                     "The Antigravity CLI (agy) was not found on PATH."
                 )
-            if model == "agy":
-                label = ""
-            else:
-                entry = next(
-                    (item for item in antigravity_model_entries()
-                     if item["id"] == model),
-                    None,
-                )
-                if entry is None:
-                    raise CLIModelError(f"Unknown Antigravity model {model!r}.")
-                label = entry["agy_model"]
+            entry = next(
+                (item for item in
+                 antigravity_model_entries(discover_antigravity_models(path))
+                 if item["id"] == model),
+                None,
+            )
+            if entry is None:
+                raise CLIModelError(f"Unknown Antigravity model {model!r}.")
+            label = entry["agy_model"]
             # agy has no effort flag; the reasoning level is baked into the
             # selected model label, so the UI effort setting is ignored here.
             text, served = run_agy(path, label, system, prompt, cwd)
