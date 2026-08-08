@@ -1,136 +1,97 @@
-# Vedium — GPU Install Guide
+# Vedium — local GGUF engine guide
 
-GPU-accelerated local models on Windows with llama-cpp-python.
+Vedium runs local `.gguf` models through a managed `llama-server` process. This
+keeps model-architecture support separate from Python and avoids Windows native
+wheel, CUDA Toolkit, and CPU-instruction compatibility traps.
 
-> Tested configuration: Windows 10/11, Python 3.12, CUDA 12.8,
-> llama-cpp-python 0.3.16 (GPU wheel), NVIDIA RTX 4060.
-> Qwen3-4B-Instruct-2507-Q4_K_M confirmed working with full GPU offload.
+## Installer (recommended)
 
-The easiest way to get the GPU build is to let the **installer** do it — it
-detects your GPU and offers the GPU engine automatically. Use this guide if
-you run Vedium **from source**, chose *Skip* during install, or need to fix
-a broken engine.
+Run the Vedium installer and choose the NVIDIA GPU or CPU engine:
 
-## Which pip?
+- The NVIDIA choice downloads the pinned llama.cpp CUDA build plus its matching
+  CUDA runtime DLLs. A compatible NVIDIA driver is required; the CUDA Toolkit
+  itself is not.
+- The CPU choice works on machines without a compatible NVIDIA GPU.
+- Skip leaves local GGUF loading unavailable but keeps cloud, CLI, and manually
+  configured server modes usable.
 
-Every `pip` command below must target the Python that actually runs Vedium:
+Reinstalling into the same directory is incremental. Vedium verifies and reuses
+the existing versioned server and compatible private Python bundle. It downloads
+an engine again only when the pinned build changes, its files are missing, or
+you perform a true uninstall.
 
-- **Installed via the installer** (Vedium ships its own private Python):
+## Choose and load a model
 
-  ```
-  "%LOCALAPPDATA%\Vedium\python\python.exe" -m pip <command>
-  ```
+The installer offers two models it can download and select automatically:
 
-- **Running from source:**
+- **Gemma 4 E4B instruct Q4_K_M** (~5.0 GB) is the best-quality choice,
+  particularly for explanations and reading tasks. It is recommended by
+  default on compatible NVIDIA systems. An 8 GB GPU is a practical fit for
+  typical use, and llama.cpp can use system RAM if full offload does not fit.
+- **Gemma 3 4B instruct Q4_K_M** (~2.5 GB) is the lightweight choice for
+  CPU-only or lower-memory systems.
 
-  ```
-  py -3.12 -m pip <command>
-  ```
+You can choose either model regardless of the recommendation, skip the model
+download, or load another compatible GGUF later. **Both recommended models run
+on the CPU and NVIDIA GPU engines**; CPU generation is simply slower. The
+current managed engine also supports newer architectures such as Qwen3.5,
+subject to the model fitting your system memory.
 
-## Prerequisites
+In Vedium, open **Settings** and:
 
-- An NVIDIA GPU with CUDA 12.x drivers — check with `nvidia-smi`
-- CUDA Toolkit 12.8 — verify with `nvcc --version`; if missing, download it
-  from <https://developer.nvidia.com/cuda-12-8-0-download-archive>
-- Python 3.12 (from-source setups only — the installer bundles its own)
-- A GGUF model file (see below)
+1. Browse to the `.gguf` file under **Model (.gguf)**.
+2. Leave **Prompt format** on **Auto**.
+3. Leave **GPU acceleration** on **Auto** unless you intentionally want CPU.
+4. Click **Save & Load Model**.
 
-## Step 1 — Install the GPU wheel
+Vedium starts its private localhost server automatically, loads the selected
+GGUF, and stops that child process when you switch backend or exit. You do not
+need to enter a server URL. The separate manual llama-server backend still
+exists for users who run their own server.
 
-Download the pre-built GPU wheel (~226 MB):
+## Running Vedium from source
 
-```
-curl -L -o llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl "https://huggingface.co/boneylizardwizard/llama_cpp_python-0.3.16-cp312-cp312-win_amd64/resolve/main/llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl"
-```
+Download a current Windows binary release from the official llama.cpp releases.
+Extract the complete distribution, not only `llama-server.exe`, because it needs
+the adjacent llama/ggml libraries. For CUDA builds, extract the matching CUDA
+runtime archive into the same directory.
 
-Install it (using the right pip from above):
-
-```
-pip install llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl
-```
-
-> ℹ This wheel is a community build by *boneylizardwizard*, not an official
-> abetlen release — the official repo stopped shipping Windows GPU wheels
-> after v0.3.4. It is llama-cpp-python 0.3.16 built for CUDA 12.8 and is
-> confirmed to support Qwen3 and Gemma 3 models on Windows. It requires
-> Python 3.12 (`cp312`).
-
-## Step 2 — Get a model
-
-Confirmed working GGUF models (2–3 GB each) on Hugging Face:
-
-- **Gemma 3 4B** — `unsloth/gemma-3-4b-it-GGUF` (the installer's default)
-  or `lmstudio-community/gemma-3-4b-it-GGUF`
-- **Qwen3 4B** — `chaparro2001/Qwen3-4B-Instruct-2507-Q4_K_M-GGUF`
-
-> ℹ Make sure the download completes fully — a partial file causes a
-> loading error even though the file appears to exist. Gemma 4 is **not**
-> supported by these engine builds.
-
-## Step 3 — Verify the GPU works
-
-Confirm the model loads on the GPU before pointing Vedium at it (replace
-the path and use the right python from above):
+Use either layout:
 
 ```
-python -c "from llama_cpp import Llama; Llama(model_path=r'D:\models\your-model.gguf', n_ctx=384, n_gpu_layers=-1, verbose=True); print('GPU OK')"
+<repo>\llama-server\cuda\llama-server.exe
+<repo>\llama-server\cpu\llama-server.exe
 ```
 
-Look for two things in the output:
+Or point Vedium to any complete distribution:
 
-- a line mentioning **CUDA0** and your GPU name — the GPU was detected
-- **GPU OK** printed at the end — the model loaded successfully
-
-## Step 4 — Point Vedium at the model
-
-Start Vedium (Desktop shortcut, or `py -3.12 -m vedium` from source),
-right-click the tray icon → **Settings**:
-
-- **Model (.gguf)** — Browse to your model file
-- **Prompt format** — leave on *Auto* (or pick *ChatML* for Qwen3 /
-  *Gemma* for Gemma 3 manually)
-- **GPU acceleration** — *Auto* or *Full*
-
-Click **Save & Load Model**.
-
-## If something breaks — rollback to the CPU build
-
-Two commands restore a known-good state (right pip from above):
-
+```powershell
+$env:VEDIUM_LLAMA_SERVER = 'D:\path\to\llama-server.exe'
+py -3.12 -m vedium
 ```
-pip uninstall llama-cpp-python -y
-pip install llama-cpp-python==0.3.19 --only-binary llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-```
-
-**Important:** after rolling back, set *GPU acceleration* to **Off** in
-Settings. Nothing breaks if you forget, but a harmless warning is logged
-on startup.
 
 ## Troubleshooting
 
-### `unknown model architecture: 'qwen3'`
+### `unknown model architecture`
 
-The installed llama-cpp-python is too old for Qwen3. Redo Step 1 with the
-exact wheel URL above.
+Re-run the installer and install the managed engine, or point
+`VEDIUM_LLAMA_SERVER` at a current llama-server distribution.
+
+### Model does not fit or loading is very slow
+
+Architecture support and hardware capacity are different. Use a smaller model
+or quantization. Auto mode lets llama.cpp fit as many layers as practical on the
+GPU and offload the rest to system RAM, but a GGUF much larger than available
+RAM/VRAM will still be slow or fail.
+
+### GPU was not detected by the installer
+
+Run `nvidia-smi`. If it is missing or reports an old driver, update the NVIDIA
+driver and rerun setup. You do not need `nvcc` or a separately installed CUDA
+Toolkit because the installer includes the matching runtime files.
 
 ### `Failed to load model from file`
 
-Wrong model path in Settings, or an incomplete download. Check the file
-exists and is roughly 2–3 GB; re-download if it is smaller.
-
-### GPU not detected — falling back to CPU
-
-CUDA Toolkit missing or drivers outdated — run `nvcc --version` to confirm
-CUDA 12.8 is present. Also check *GPU acceleration* is *Auto* or *Full* in
-Settings, not *Off*.
-
-### CMAKE error during install
-
-pip is compiling from source instead of using the pre-built wheel. Install
-from the `.whl` file directly (Step 1) — never plain
-`pip install llama-cpp-python`.
-
-### Tray icon does not appear
-
-A dependency is missing: `pip install pystray pillow pynput`
-(from-source setups only — the installer always ships these).
+Verify that the path still exists and the `.gguf` download completed. The local
+server log is `managed-server.log` in the Vedium directory and contains the
+exact llama.cpp loading error.

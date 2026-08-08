@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """LLM backend clients and connection management.
 
 One client per transport (local llama-cpp, llama.cpp server,
@@ -17,6 +20,12 @@ import json
 
 from vedium.config import load_cfg
 from vedium import diagnostics
+from vedium.managed_server import (
+    ManagedServerError,
+    find_managed_server,
+    start_managed_server,
+    stop_managed_server,
+)
 from vedium.cli_models import (
     CLIClient,
     CLIModelError,
@@ -32,37 +41,12 @@ from vedium.llm_postprocess import (
 )
 
 
-def _make_llama(path: str, *, use_gpu: bool, n_ctx: int = 768):
-    """Create a Llama instance. If use_gpu=True, request full GPU layer offload.
-    n_ctx sets the KV cache / context window size; read from config by load_model()."""
-    from llama_cpp import Llama
-
-    kwargs = {
-        "model_path": path,
-        "n_ctx":      n_ctx,  # configurable via Settings; default 4096
-                              # (system ~150 tokens + sentence ~80 + output ~100 = ~330 peak)
-                              # raise to 2048-4096 for long selected-text rephrases
-        "n_batch":    128,    # smaller batch = less prefill overhead for short prompts
-        "n_threads":  os.cpu_count() or 4,
-        "verbose":    False,
-    }
-    if use_gpu:
-        # -1 asks llama.cpp to offload all possible layers. If CUDA/GPU support is
-        # unavailable or loading fails, load_model() catches the error and retries CPU.
-        kwargs["n_gpu_layers"] = -1
-
-    return Llama(**kwargs)
-
-
 class _LlamaServerClient:
     """
-    Drop-in replacement for a llama_cpp.Llama instance that talks to a
-    running llama-server (llama.cpp HTTP server) instead of loading a model
-    in-process.
+    Internal client for a running llama-server (llama.cpp HTTP server).
 
-    The __call__ interface mirrors llama_cpp.Llama closely enough that all
-    existing call sites (spell_check_sentence, rephrase_sentence_stream,
-    chat_with_text_stream) work without any modification.
+    The __call__ interface retains Vedium's historical completion shape while
+    native chat methods use each model's embedded template.
 
     llama-server quick-start:
         llama-server -m your_model.gguf --port 8080
@@ -71,6 +55,7 @@ class _LlamaServerClient:
 
     def __init__(self, base_url: str, cfg_n_ctx: int = 4096):
         self.base_url = base_url.rstrip("/")
+        self.supports_chat_template_kwargs = True
         self._n_ctx   = cfg_n_ctx     # use the user-configured value; updated by _probe() if server exposes it
         # Control string that, appended to the prompt, makes a "thinking" model
         # skip its chain-of-thought and answer directly. Extracted from the
@@ -98,6 +83,9 @@ class _LlamaServerClient:
         from the very first call rather than waiting for the first <think> token.
         """
         import urllib.request, json as _json, re as _re, codecs as _codecs
+        # A newly selected model must not inherit the previous model's flag if
+        # /props fails or exposes a non-reasoning template.
+        _backend.reasoning_detected = False
         try:
             resp = urllib.request.urlopen(f"{self.base_url}/props", timeout=5)
             data = _json.loads(resp.read())
@@ -126,14 +114,13 @@ class _LlamaServerClient:
                         self._think_disable_suffix = mm.group(1)
 
             if is_reasoning:
-                # Always reserve the thinking budget so that IF the user turns the
-                # "disable thinking" setting off, spell-check/rephrase still have
-                # token room for the model to reason. Harmless when thinking is
-                # disabled (just a higher max_tokens cap the model stops short of).
+                # The budget is used only if the user enables thinking. Native
+                # chat requests pass enable_thinking=false through the embedded
+                # template, so disabled mode does not waste output capacity.
                 _backend.reasoning_detected = True
-                if self._think_disable_suffix:
+                if _backend.server_disable_thinking:
                     print("[Vedium] Reasoning model detected — thinking disabled by "
-                          "default (toggle in Settings → server panel).", flush=True)
+                          "the native chat template.", flush=True)
                 else:
                     print("[Vedium] Reasoning model detected via /props — thinking budget active.", flush=True)
         except Exception:
@@ -190,8 +177,129 @@ class _LlamaServerClient:
 
         return self._iter_stream(req)
 
+    def _chat_payload(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        repeat_penalty: float = 1.0,
+        stop=None,
+        stream: bool,
+    ) -> dict:
+        """Build a native llama-server chat request.
+
+        Using the model's embedded Jinja template is essential for newer
+        architectures such as Qwen3.5 and Gemma 4. Raw, hand-built ChatML is
+        not sufficient to control their reasoning mode reliably.
+        """
+        return {
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "repeat_penalty": repeat_penalty,
+            "stop": stop or [],
+            "stream": stream,
+            "chat_template_kwargs": {
+                "enable_thinking": not _backend.server_disable_thinking,
+            },
+        }
+
+    def complete_messages(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        repeat_penalty: float = 1.0,
+        stop=None,
+    ) -> dict:
+        """Complete semantic chat messages through /v1/chat/completions."""
+        payload = self._chat_payload(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
+            stream=False,
+        )
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as response:
+                result = json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(
+                f"llama-server returned HTTP {exc.code} for chat completion "
+                f"at {self.base_url} ({exc.reason})"
+            ) from exc
+        choices = result.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        return {
+            "choices": [{
+                "text": message.get("content") or "",
+                "finish_reason": choices[0].get("finish_reason") if choices else None,
+            }]
+        }
+
+    def stream_messages(
+        self,
+        messages: list[dict],
+        *,
+        max_tokens: int,
+        temperature: float,
+        repeat_penalty: float = 1.0,
+        stop=None,
+    ):
+        """Stream semantic chat messages through the OpenAI-compatible route."""
+        payload = self._chat_payload(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
+            stream=True,
+        )
+        req = urllib.request.Request(
+            f"{self.base_url}/v1/chat/completions",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        return self._iter_chat_stream(req)
+
+    def _iter_chat_stream(self, req):
+        response = urllib.request.urlopen(req, timeout=120)
+        try:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                text = delta.get("content") or ""
+                if text:
+                    yield {"choices": [{"text": text}]}
+                if choices[0].get("finish_reason"):
+                    break
+        finally:
+            response.close()
+
     def _iter_stream(self, req):
-        """Yield llama_cpp-compatible chunk dicts from the SSE stream.
+        """Yield Vedium-compatible chunk dictionaries from the SSE stream.
 
         llama-server ends the stream with a JSON chunk where "stop" is true,
         then closes the connection.  It does NOT send 'data: [DONE]' (that is
@@ -343,7 +451,7 @@ def _backend_unavailable_message(cfg: dict | None = None, feature: str = "chat")
 class _CloudClient:
     """OpenAI-compatible chat client. Drop-in for the _backend.client interface.
 
-    Mirrors llama_cpp.Llama / _LlamaServerClient: __call__ returns
+    Mirrors Vedium's internal completion client shape: __call__ returns
     {"choices":[{"text":...}]} (or yields those dicts when stream=True) and
     exposes context_params.n_ctx, so all existing call sites work unchanged.
     """
@@ -508,6 +616,8 @@ class _CloudClient:
 def connect_cli(model: str, enabled: bool, effort: str = "") -> str:
     """Select an installed CLI backend without spending a model request."""
 
+    stop_managed_server()
+
     # Selection failure must not leave the previous backend resident: with the
     # config already set to "cli", that would act like an invisible fallback.
     with _backend.lock:
@@ -548,6 +658,7 @@ def connect_cloud(base_url: str, api_key: str, model: str, cfg_n_ctx: int = 8192
     Returns a short backend label on success; raises on failure.
     """
 
+    stop_managed_server()
     base_url = base_url.strip()
     if not base_url.startswith(("http://", "https://")):
         base_url = "https://" + base_url
@@ -888,6 +999,14 @@ def _complete_prompt(prompt: str, *, max_tokens: int, temperature: float,
             _prompt_to_messages(prompt), max_tokens=max_tokens,
             temperature=temperature, stop=stop, cfg=cfg, on_fallback=on_fallback,
         )
+    if isinstance(client, _LlamaServerClient) and messages is not None:
+        return client.complete_messages(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
+        )
     return client(
         prompt, max_tokens=max_tokens, temperature=temperature,
         repeat_penalty=repeat_penalty, stop=stop, echo=echo,
@@ -917,6 +1036,15 @@ def _stream_prompt(prompt: str, *, max_tokens: int, temperature: float,
             _prompt_to_messages(prompt), max_tokens=max_tokens,
             temperature=temperature, stop=stop, cfg=cfg,
             on_fallback=on_fallback,
+        )
+        return
+    if isinstance(client, _LlamaServerClient) and messages is not None:
+        yield from client.stream_messages(
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            repeat_penalty=repeat_penalty,
+            stop=stop,
         )
         return
     yield from client(
@@ -989,6 +1117,10 @@ def connect_server(url: str, cfg_n_ctx: int = 4096) -> str:
     Returns a short backend label string on success; raises on failure.
     """
     import urllib.request, json as _json
+
+    # Manual server mode supersedes only the child process Vedium owns. An
+    # arbitrary external llama-server is never terminated.
+    stop_managed_server()
 
     url = url.strip()
     if not url.startswith(("http://", "https://")):
@@ -1093,175 +1225,87 @@ def detect_local_server(timeout: float = 0.3, host: str = "127.0.0.1") -> str:
     return ""
 
 
-def _cuda_device_count() -> int:
-    """
-    Return the number of CUDA devices visible to llama-cpp-python.
-    Uses ctranslate2 if available (same check as voice_anywhere), then falls
-    back to reading llama_cpp directly.  Returns 0 if nothing is found.
-    """
-    try:
-        import ctranslate2 as _ct2
-        return _ct2.get_cuda_device_count()
-    except Exception:
-        pass
-    try:
-        from llama_cpp import llama_backend_init  # noqa: F401  (presence confirms GPU build)
-        # llama_cpp exposes no explicit device-count API; rely on the fact that
-        # n_gpu_layers > 0 will simply fail at load time if CUDA is absent.
-        return 1  # optimistic — actual check happens in _make_llama
-    except Exception:
-        return 0
-
-
-def _detect_gpu_backend() -> str:
-    """
-    Return a human-readable label for the active GPU backend.
-
-    Three methods are tried in order; the first one that succeeds wins:
-
-    1. GGML backend registry  (llama-cpp-python >= 0.3 / modern llama.cpp)
-       ggml_backend_reg_get_name() enumerates every loaded backend — the
-       most reliable source because it reflects what is actually running, not
-       just what was compiled in.
-
-    2. llama_print_system_info() string  (older builds)
-       Parses the "KEY = VALUE | …" feature string.  Spaces around "=" are
-       stripped before matching to cope with minor formatting differences
-       across llama.cpp versions.
-
-    3. OS heuristic
-       Metal is macOS-exclusive, so Darwin + GPU load success → Metal.
-
-    Returns "GPU (unknown)" only if all three methods fail.
-    """
-    # ── Method 1: GGML backend registry ──────────────────────────────────────
-    try:
-        import llama_cpp.llama_cpp as _lc
-        count = _lc.ggml_backend_reg_count()
-        names = []
-        for i in range(count):
-            reg  = _lc.ggml_backend_reg_get(i)
-            name = _lc.ggml_backend_reg_name(reg)
-            if isinstance(name, (bytes, bytearray)):
-                name = name.decode()
-            names.append(name.upper())
-        # Walk priority order — skip the always-present CPU backend
-        _registry_checks = [
-            ("CUDA",   "CUDA"),
-            ("CUBLAS", "CUDA"),
-            ("METAL",  "Metal"),
-            ("HIP",    "ROCm (HIP)"),
-            ("ROCM",   "ROCm (HIP)"),
-            ("VULKAN", "Vulkan"),
-            ("SYCL",   "SYCL"),
-            ("OPENCL", "OpenCL"),
-        ]
-        for fragment, label in _registry_checks:
-            if any(fragment in n for n in names):
-                return label
-    except Exception:
-        pass
-
-    # ── Method 2: llama_print_system_info() ──────────────────────────────────
-    try:
-        from llama_cpp import llama_print_system_info
-        raw  = llama_print_system_info()
-        info = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
-        # Normalise spacing so "CUDA = 1" and "CUDA=1" both match
-        info_norm = info.replace(" ", "")
-        _sysinfo_checks = [
-            ("CUDA=1",    "CUDA"),
-            ("cuBLAS=1",  "CUDA"),
-            ("CUBLAS=1",  "CUDA"),
-            ("Metal=1",   "Metal"),
-            ("HIP=1",     "ROCm (HIP)"),
-            ("Vulkan=1",  "Vulkan"),
-            ("SYCL=1",    "SYCL"),
-            ("OpenCL=1",  "OpenCL"),
-        ]
-        for marker, label in _sysinfo_checks:
-            if marker in info_norm:
-                return label
-    except Exception:
-        pass
-
-    # ── Method 3: OS heuristic ────────────────────────────────────────────────
-    import platform
-    if platform.system() == "Darwin":
-        return "Metal"
-
-    return "GPU (unknown)"
-
-
 def load_model(path: str):
-    """
-    Load (or reload) a GGUF model from disk. Blocks until done.
-    Returns a short backend label: "GPU", "CPU", or "CPU (GPU fallback)".
-    """
-
-    # Fail fast with a clear message when llama-cpp-python is missing.
-    # Without this check the GPU attempt fails with ModuleNotFoundError, the
-    # code prints a misleading "falling back to CPU", and the CPU attempt
-    # then fails with the exact same missing-module error.
-    try:
-        import llama_cpp  # noqa: F401
-    except ImportError as exc:
-        msg = (
-            "llama-cpp-python is not installed in this Python "
-            f"({sys.version_info.major}.{sys.version_info.minor}, {sys.executable}) — "
-            "local GGUF models are unavailable. Cloud API and llama-server "
-            "backends are unaffected. Install it with: pip install llama-cpp-python"
-        )
-        diagnostics.record("backend", "error", "Local model backend unavailable.", msg)
-        print(f"[Vedium] {msg}", file=sys.stderr)
-        raise RuntimeError(msg) from exc
-
+    """Load a local GGUF with Vedium's managed llama-server process."""
     cfg = load_cfg()
     gpu_mode = cfg.get("gpu_acceleration", "Auto")
-    wants_gpu = gpu_mode in ("Auto", "Full")
-    n_ctx     = int(cfg.get("n_ctx", 4096))
+    n_ctx = int(cfg.get("n_ctx", 4096))
+    server_executable = find_managed_server(cfg.get("managed_server_path", ""))
 
-    if not wants_gpu:
-        print("[Vedium] GPU acceleration disabled — loading on CPU.", file=sys.stderr)
+    if not server_executable:
+        stop_managed_server()
+        with _backend.lock:
+            _backend.client = None
+            _backend.path = ""
+            _backend.label = "None"
+        msg = (
+            "The managed local-model engine is not installed. Re-run the "
+            "Vedium installer and choose the NVIDIA GPU or CPU engine. "
+            "Cloud API, CLI, and manually configured server modes are unaffected."
+        )
+        diagnostics.set_status(backend="Unavailable", backend_mode="local")
+        diagnostics.record("backend", "error", "Local model backend unavailable.", msg)
+        raise RuntimeError(msg)
 
     with _backend.lock:
-        if wants_gpu:
-            try:
-                _backend.client = _make_llama(path, use_gpu=True, n_ctx=n_ctx)
-                # Warmup: run a minimal inference to catch missing DLLs or driver
-                # issues before the first real sentence arrives.  Same pattern as
-                # voice_anywhere.py — the first real inference should not pay the
-                # JIT cost or discover a broken CUDA install mid-sentence.
-                try:
-                    _backend.client("Hi", max_tokens=1, echo=False)
-                    gpu_backend = _detect_gpu_backend()
-                    _backend.label = f"GPU ({gpu_backend})"
-                    _backend.path = path
-                    print(f"[Vedium] GPU warmup passed — running on {gpu_backend}.", file=sys.stderr)
-                    diagnostics.set_status(backend=_backend.label, backend_mode="local")
-                    diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
-                    return _backend.label
-                except Exception as warmup_err:
-                    print(
-                        f"[Vedium] GPU warmup failed ({warmup_err}); reloading on CPU.",
-                        file=sys.stderr,
-                    )
-                    _backend.client = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
-                    _backend.label = "CPU (GPU warmup failed)"
-                    _backend.path = path
-                    diagnostics.set_status(backend=_backend.label, backend_mode="local")
-                    diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
-                    return _backend.label
-            except Exception as gpu_error:
-                diagnostics.record("backend", "warning", "GPU load failed; falling back to CPU.", str(gpu_error))
-                print(
-                    f"[Vedium] GPU load failed; falling back to CPU: {gpu_error}",
-                    file=sys.stderr,
-                )
+        _backend.client = None
+        _backend.path = ""
+        _backend.label = "None"
 
-        _backend.client = _make_llama(path, use_gpu=False, n_ctx=n_ctx)
+    try:
+        url = start_managed_server(
+            path,
+            n_ctx=n_ctx,
+            gpu_mode=gpu_mode,
+            configured_path=server_executable,
+        )
+        client = _LlamaServerClient(url, cfg_n_ctx=n_ctx)
+        # /health only proves that the process started. A real chat request also
+        # verifies the GGUF architecture and its embedded template.
+        probe = client.complete_messages(
+            [{"role": "user", "content": "Reply with OK."}],
+            max_tokens=16,
+            temperature=0.0,
+        )
+        if not isinstance(probe, dict) or not probe.get("choices"):
+            raise ManagedServerError(
+                "Managed server returned an invalid probe response."
+            )
+    except Exception as exc:
+        stop_managed_server()
+        msg = (
+            "The managed local engine could not load this GGUF model. "
+            f"{exc}"
+        )
+        diagnostics.set_status(backend="Load failed", backend_mode="local")
+        diagnostics.record("backend", "error", "Local GGUF load failed.", msg)
+        raise RuntimeError(msg) from exc
+
+    executable_lower = server_executable.lower()
+    if "vulkan" in executable_lower:
+        engine = "Vulkan"
+        label = "Local server GPU (Vulkan)"
+    elif "cuda" in executable_lower:
+        engine = "CUDA"
+        label = "Local server GPU (CUDA)"
+    elif "cpu" in executable_lower or gpu_mode == "Off":
+        engine = "CPU"
+        label = "Local server (CPU)"
+    else:
+        engine = "managed auto-fit"
+        label = "Local server (managed auto-fit)"
+
+    with _backend.lock:
+        _backend.client = client
         _backend.path = path
-        _backend.label = "CPU (GPU fallback)" if wants_gpu else "CPU"
-        diagnostics.set_status(backend=_backend.label, backend_mode="local")
-        diagnostics.record("backend", "info", f"Loaded local model on {_backend.label}.")
-        return _backend.label
+        _backend.label = label
+    diagnostics.set_status(backend=label, backend_mode="local")
+    diagnostics.record(
+        "backend", "info",
+        f"Loaded local GGUF with managed llama-server ({engine}).",
+    )
+    print(
+        f"[Vedium] Managed llama-server loaded {path} at {url} ({engine}).",
+        file=sys.stderr,
+    )
+    return label

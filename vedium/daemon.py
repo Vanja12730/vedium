@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import os
 import sys
 import re
@@ -11,7 +14,6 @@ import pynput.keyboard as _pynput_kb
 
 from vedium import diagnostics
 from vedium.constants import (
-    _SLAVIC_LANGS,
     _OS_RESERVED_HOTKEYS,
     _CTRL_KEYS,
     _rephrase_history,
@@ -20,7 +22,8 @@ from vedium.constants import (
     _resolve_trigger_mode,
     _is_answer_mode,
 )
-from vedium.config import load_cfg, save_cfg
+from vedium.config import load_cfg, save_cfg, resolve_prompt_format
+from vedium.language import is_same_language
 from vedium.buffer import _Buffer
 from vedium.replacement import (
     _kbctrl,
@@ -47,9 +50,11 @@ from vedium.llm import (
     connect_cli,
 )
 from vedium.cli_models import CLIModelError
+from vedium.managed_server import stop_managed_server
 from vedium.ui_toasts import (
     _Toast,
     _EditableToast,
+    _save_generated_style,
     _open_recent_rephrases,
     _info_toast,
 )
@@ -127,6 +132,14 @@ class SpellDaemon:
         self._sentence_queue        = queue.Queue()
         self._sentence_worker       = None
         self._stop_sentence_worker  = threading.Event()
+
+    def _dismiss_rephrase_toast(self, toast):
+        """Dismiss a failed generation without clearing a newer active toast."""
+        if toast is not None:
+            toast.close()
+        with self._active_rephrase_lock:
+            if self._active_rephrase_toast is toast:
+                self._active_rephrase_toast = None
 
     def _start_sentence_worker(self):
         """Start the single spell-check worker that drains sentence jobs in order."""
@@ -459,7 +472,10 @@ class SpellDaemon:
 
         try:
             working_lang   = self.cfg.get("working_language", "Auto")
-            is_translation = working_lang.strip() not in ({"Auto"} | _SLAVIC_LANGS)
+            # Same predicate spell_check_sentence uses to pick its prompt: if
+            # these disagree the text gets corrected while the safety net is
+            # relaxed as though it had been translated.
+            is_translation = not is_same_language(sentence, working_lang)
             diacr_only = self.cfg.get("diacritics_only_auto", False)
             # Spell-check is a single non-streaming completion, so a cloud
             # quota failover happens before any toast exists. Collect the
@@ -468,7 +484,7 @@ class SpellDaemon:
             # one they selected.
             cloud_switches: list[tuple[str, str]] = []
             corrected = spell_check_sentence(
-                sentence, self.cfg.get("prompt_format", FORMATS[0]), working_lang,
+                sentence, resolve_prompt_format(self.cfg), working_lang,
                 diacritics_only=diacr_only, cfg=self.cfg,
                 on_fallback=lambda failed, nxt: cloud_switches.append((failed, nxt)),
             )
@@ -599,7 +615,7 @@ class SpellDaemon:
                 # the replacement is done — the same pattern used by the silent path.
                 self.buf.set_busy(True)
                 toast = _Toast(sentence + punct, corrected + punct, accept, ignore,
-                               fmt=self.cfg.get("prompt_format", FORMATS[0]), cfg=self.cfg)
+                               fmt=resolve_prompt_format(self.cfg), cfg=self.cfg)
                 if cloud_switches:
                     # First model that failed → model that actually answered.
                     toast.show_model_switch(cloud_switches[0][0], cloud_switches[-1][1])
@@ -682,11 +698,12 @@ class SpellDaemon:
         and waiting for user input.  The caller uses this to release the rephrase
         hotkey lock so a subsequent action-key press can close the toast and restart.
         """
+        toast = None
         diagnostics.set_status(busy=True)
         try:
             mode      = mode_override or self.cfg.get("rephrase_writing_mode", "Polish My Writing")
             is_answer = _is_answer_mode(mode)
-            fmt       = self.cfg.get("prompt_format", FORMATS[0])
+            fmt       = resolve_prompt_format(self.cfg)
             ev        = threading.Event()
             _accepted = [False]
             _edited   = ["Generating suggestion..."]
@@ -791,6 +808,7 @@ class SpellDaemon:
         except Exception as exc:
             # LLM crash, OOM, or any other unexpected error — release the pending
             # lock so the daemon can continue processing future sentences.
+            self._dismiss_rephrase_toast(toast)
             diagnostics.record("rephrase", "error", "Rephrase pipeline failed.", str(exc))
             _surface_cli_error(exc)
             self.buf.finalize(replaced=False)
@@ -817,11 +835,12 @@ class SpellDaemon:
         hotkey lock so a subsequent action-key press can close the toast and restart.
         """
         corrected = ""
+        toast = None
         diagnostics.set_status(busy=True)
         try:
             mode = mode_override or self.cfg.get("rephrase_reading_mode", "What's This About?")
             is_answer = _is_answer_mode(mode)
-            fmt  = self.cfg.get("prompt_format", FORMATS[0])
+            fmt  = resolve_prompt_format(self.cfg)
             ev        = threading.Event()
             _accepted = [False]
             _edited   = ["Generating suggestion..."]
@@ -835,8 +854,14 @@ class SpellDaemon:
                 ev.set()
 
             label = mode if is_answer else f"Improve selected text  ({mode})"
-            toast = _EditableToast(_edited[0], accept, ignore, label=label, original=selected_text, fmt=fmt,
-                                   answer_only=is_answer, cfg=self.cfg)
+            on_save_style = (
+                (lambda generated, parent: _save_generated_style(self.cfg, generated, parent))
+                if mode == "Extract Writing Style" else None
+            )
+            toast = _EditableToast(
+                _edited[0], accept, ignore, label=label, original=selected_text, fmt=fmt,
+                answer_only=is_answer, cfg=self.cfg, on_save_style=on_save_style,
+            )
             with self._active_rephrase_lock:
                 self._active_rephrase_toast = toast
             # Mark the buffer busy NOW — before the LLM starts — so that
@@ -903,8 +928,14 @@ class SpellDaemon:
                 final_text = ""
             else:
                 diagnostics.record("rephrase", "info", "Selected text rephrase ignored.")
-        except CLIModelError as exc:
-            diagnostics.record("rephrase", "error", "Selected-text CLI request failed.", str(exc))
+        except Exception as exc:
+            self._dismiss_rephrase_toast(toast)
+            message = (
+                "Selected-text CLI request failed."
+                if isinstance(exc, CLIModelError)
+                else "Selected-text rephrase failed."
+            )
+            diagnostics.record("rephrase", "error", message, str(exc))
             _surface_cli_error(exc)
             raise
         finally:
@@ -954,6 +985,7 @@ class SpellDaemon:
     def _quit(self, icon, item):
         self._stop_sentence_worker.set()
         self._sentence_queue.put(None)
+        stop_managed_server()
         icon.stop()
         if self._listener:
             self._listener.stop()

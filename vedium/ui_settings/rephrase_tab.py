@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Assistant tab: hotkeys, default modes, and the mode-prompt manager."""
 
 import tkinter as tk
@@ -766,6 +769,24 @@ def _build_rephrase_tab(ui):
         "Custom modes you add appear here.\n\n" + _mode_tooltip
     )
 
+    def _refresh_external_modes():
+        """Pull in modes saved while this Settings window was already open."""
+        for target, key in (
+            (_custom, "custom_rephrase_modes"),
+            (_builtin_overrides, "builtin_prompt_overrides"),
+            (_mode_triggers, "mode_triggers"),
+            (_mode_hotkeys, "mode_hotkeys"),
+        ):
+            target.clear()
+            target.update(cfg.get(key, {}))
+        reading_rephrase_var.set(
+            cfg.get("rephrase_reading_mode", "What's This About?"))
+        writing_rephrase_var.set(
+            cfg.get("rephrase_writing_mode", "Polish My Writing"))
+        _prev_reading_rephrase[0] = reading_rephrase_var.get()
+        _prev_writing_rephrase[0] = writing_rephrase_var.get()
+        _refresh_lb()
+
     # ── publish shared state ──────────────────────────────────────────────────
     ui.understand_hotkey_var = understand_hotkey_var
     ui.writing_hotkey_var = writing_hotkey_var
@@ -773,3 +794,4 @@ def _build_rephrase_tab(ui):
     ui.creativity_var = creativity_var
     ui.custom, ui.builtin_overrides = _custom, _builtin_overrides
     ui.mode_triggers, ui.mode_hotkeys = _mode_triggers, _mode_hotkeys
+    ui.refresh_rephrase_modes = _refresh_external_modes

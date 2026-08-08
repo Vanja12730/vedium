@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 r"""Build the portable Python bundle that ships inside the Vedium installer.
 
 Creates  python_embed\  next to this script:

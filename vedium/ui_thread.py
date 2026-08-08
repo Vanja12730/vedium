@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Single Tk UI thread shared by settings, toasts, and clipboard access.
 
 Tk is not thread-safe: every widget, Tk variable, popup, and clipboard call

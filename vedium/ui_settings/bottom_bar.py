@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Bottom bar: status label and the Connect flow.
 
 Behaviour, Assistant, and Appearance settings apply and persist the moment

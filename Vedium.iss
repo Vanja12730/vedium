@@ -1,3 +1,6 @@
+; Copyright (C) 2026 vehab
+; SPDX-License-Identifier: GPL-3.0-only
+;
 ; ─────────────────────────────────────────────────────────────────────────────
 ;  Vedium.iss  —  Inno Setup 6 installer script
 ;
@@ -5,11 +8,13 @@
 ;    1. Copies the vedium package, run.vbs and a PRIVATE portable
 ;       Python 3.12 (with tkinter, pip, pystray, pillow, pynput pre-installed)
 ;       to the install folder — the user's own Python, if any, is never
-;       touched or even looked at
-;    2. Installs llama-cpp-python into that private Python (CPU or GPU build,
-;       user's choice; CPU wheel picked to match the machine's AVX support)
-;    3. Optionally downloads the recommended Gemma 3 GGUF model into the
-;       install folder (with a live progress bar) and pre-selects it in config
+;       touched or even looked at. Compatible reinstalls preserve this private
+;       environment so already-installed packages are reused.
+;    2. Reuses or downloads a current managed llama-server engine (CPU or
+;       NVIDIA CUDA). The engine is independent of private Python and supports
+;       current GGUF architectures such as Qwen3.5 and Gemma 4.
+;    3. Optionally downloads Gemma 4 E4B (best quality) or Gemma 3 4B
+;       (lightweight), with a live progress bar, and pre-selects it in config
 ;    4. Creates a Desktop shortcut that launches run.vbs
 ;    5. Registers the app in Add/Remove Programs with a clean uninstaller
 ;
@@ -30,9 +35,13 @@
 #endif
 
 #define AppName      "Vedium"
-#define AppVersion   "1.2"
+#define AppVersion   "1.3"
 #define AppPublisher "The Ved Project"
 #define AppExeName   "run.vbs"
+; Bump this only when the portable Python/runtime dependency bundle changes in
+; an incompatible way. Code-only Vedium updates should leave it unchanged so
+; reinstalls retain private packages and the separately cached local engine.
+#define PythonBundleVersion "3.12.9-ui1"
 
 [Setup]
 ; Unique app identity for Windows (Add/Remove Programs, upgrade detection).
@@ -52,12 +61,15 @@ OutputBaseFilename=VediumSetup_v{#AppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-; Always prompt for install location — never silently reuse the previous path
-UsePreviousAppDir=no
+; Default to the existing install folder on upgrades/reinstalls. The directory
+; page is still shown, so the user can choose another location explicitly.
+UsePreviousAppDir=yes
 ; Run as the current user — avoids PATH mismatch between user and admin accounts
 PrivilegesRequired=lowest
 ; Minimum Windows version: Windows 10
 MinVersion=10.0
+; Every bundled runtime and managed engine binary is 64-bit.
+ArchitecturesAllowed=x64compatible
 ; Show a friendly name in Add/Remove Programs
 UninstallDisplayName={#AppName}
 
@@ -77,8 +89,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 ; Core application files — copied to the install directory
-Source: "vedium\*"; DestDir: "{app}\vedium"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "vedium\*"; DestDir: "{app}\vedium"; Excludes: "__pycache__\*,*.pyc"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "run.vbs";         DestDir: "{app}"; Flags: ignoreversion
+Source: "LICENSE";         DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Private portable Python 3.12 — built by make_python_bundle.py. run.vbs
 ; prefers {app}\python\pythonw.exe, so the app always runs on this exact
 ; interpreter regardless of what Python (if any) the user has installed.
@@ -87,17 +102,16 @@ Source: "python_embed\*"; DestDir: "{app}\python"; Flags: ignoreversion recurses
 Source: "{#SourcePath}app.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [InstallDelete]
-; Wipe the bundled Python before copying the fresh one.  Inno Setup overwrites
-; files it ships but never removes ones it doesn't, so without this, upgrading
-; would leave obsolete package versions' files piling up in Lib\site-packages.
-; Cost: the AI engine (llama-cpp-python) lives there too, so a reinstall asks
-; for the CPU/GPU choice again and re-downloads that wheel.
-; The user's config and downloaded models live in {app} itself, NOT here, and
-; are preserved across reinstalls.
-Type: filesandordirs; Name: "{app}\python"
+; Preserve the private Python on ordinary reinstalls so its verified UI packages
+; are reused. Reset it only when the bundle compatibility marker changes, or
+; when a legacy install is not Python 3.12.
+; The fresh bundle is copied immediately afterwards by [Files].
+Type: filesandordirs; Name: "{app}\python"; Check: ShouldResetPythonBundle
 ; Pre-rename package dir (the package was called spell_daemon before v1.2) —
 ; without this an upgrade would leave the old copy of the app behind.
 Type: filesandordirs; Name: "{app}\spell_daemon"
+; Remove an obsolete dependency log name left by pre-managed-engine installers.
+Type: files; Name: "{app}\install-engine.log"
 
 [Icons]
 ; Desktop shortcut — wscript.exe runs run.vbs silently (no console window)
@@ -120,11 +134,13 @@ Name: "{userdesktop}\{#AppName}";  \
 //  the install.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Recommended local model — Gemma 3 4B instruct, Q4_K_M quant (~2.49 GB).
-// Gemma 3 is used (NOT Gemma 4): Gemma 4's architecture is not supported by the
-// pinned llama-cpp-python builds (CPU v0.3.19 / GPU v0.3.16) this installer ships.
-// This repo is public and ungated, so a direct urllib download needs no login.
+// Recommended public, ungated local models. Gemma 4 E4B is the quality choice;
+// Gemma 3 4B remains available for modest hardware and CPU-oriented installs.
 const
+  GEMMA4_FILENAME = 'gemma-4-E4B-it-Q4_K_M.gguf';
+  GEMMA4_URL =
+    'https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF/resolve/main/' +
+    'gemma-4-E4B-it-Q4_K_M.gguf';
   GEMMA3_FILENAME = 'gemma-3-4b-it-Q4_K_M.gguf';
   GEMMA3_URL =
     'https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/' +
@@ -134,47 +150,70 @@ var
   GPythonExe:        String;  // full path to the bundled {app}\python\python.exe
   GInstalledSummary: String;  // running log of installed packages/features;
                                // shown in the final completion dialog
-  GAVX512Supported:  Boolean; // True if the CPU supports AVX-512; set by DetectAVX512()
-  GCudaOK:           Boolean; // True if an NVIDIA driver supporting CUDA >= 12.8
+  GCudaOK:           Boolean; // True if an NVIDIA driver supporting CUDA >= 12.4
                                // is present; set by DetectNvidiaCuda()
-  GModelDownloaded:  Boolean; // True if the Gemma 3 model was downloaded into {app}
+  GEngineInstalled:  Boolean; // True only after the selected managed server starts
+  GInstallLogFile:   String;  // persistent dependency log used for actionable failures
+  GModelDownloaded:  Boolean; // True if a recommended model is selected in {app}
   GModelPath:        String;  // full path to the downloaded .gguf (if any)
+  GModelDisplayName: String;  // selected recommended model name for summaries
+  GExistingModelConfig: Boolean; // True when a returning user's config is preserved
 
 
-// ── Detect AVX-512 CPU support ────────────────────────────────────────────────
-// Uses Windows' IsProcessorFeaturePresent(41) — PF_AVX512F_INSTRUCTIONS_AVAILABLE.
-// Requires no Python packages; the kernel32 call is available on all Windows 10+.
-// Result is stored in GAVX512Supported so CheckLlamaCpp() can pick the right wheel.
-//
-// AVX-512 → install latest llama-cpp-python (supports Qwen3, Gemma 3, all models)
-// AVX2 only (Ryzen 5000/7000, older Intel) → install v0.3.19 (stable, avoids crash)
-procedure DetectAVX512();
+// ── Incremental reinstall / private Python compatibility ────────────────────
+// Ordinary code-only reinstalls preserve {app}\python so its UI packages are
+// not downloaded again. A future installer can deliberately
+// refresh the whole private runtime by bumping PythonBundleVersion above.
+function ShouldResetPythonBundle(): Boolean;
 var
-  TmpFile: String;
-  Lines:   TArrayOfString;
-  Code:    Integer;
-  PySnip:  String;
+  PythonDir:      String;
+  PythonExe:      String;
+  MarkerFile:     String;
+  ExistingMarker: String;
+  Lines:          TArrayOfString;
+  Code:           Integer;
 begin
-  GAVX512Supported := False;  // safe default — assume AVX2-only if detection fails
+  Result     := False;
+  PythonDir  := ExpandConstant('{app}\python');
+  PythonExe  := PythonDir + '\python.exe';
+  MarkerFile := PythonDir + '\.vedium-bundle-version';
 
-  TmpFile := ExpandConstant('{tmp}\ga_avx512.txt');
+  if not DirExists(PythonDir) then Exit;
 
-  // PF_AVX512F_INSTRUCTIONS_AVAILABLE = 41
-  // IsProcessorFeaturePresent returns nonzero BOOL if the feature is present.
-  PySnip := '-c "import ctypes; ' +
-            'r = ctypes.windll.kernel32.IsProcessorFeaturePresent(41); ' +
-            'print(1 if r else 0)"';
+  // Current installers leave an explicit compatibility marker. A mismatch
+  // means the bundled interpreter/dependencies changed enough to require a
+  // clean replacement instead of mixing old and new native files.
+  if FileExists(MarkerFile) then
+  begin
+    ExistingMarker := '';
+    if LoadStringsFromFile(MarkerFile, Lines) and
+       (GetArrayLength(Lines) > 0) then
+      ExistingMarker := Trim(Lines[0]);
+    Result := ExistingMarker <> '{#PythonBundleVersion}';
+    Exit;
+  end;
 
-  Exec('cmd.exe',
-       '/c "' + GPythonExe + '" ' + PySnip + ' > "' + TmpFile + '" 2>&1',
-       '', SW_HIDE, ewWaitUntilTerminated, Code);
+  // One-time migration for installs made before the marker existed. Preserve a
+  // working Python 3.12 bundle; reset only an incompatible or broken legacy runtime.
+  if not FileExists(PythonExe) then
+  begin
+    Result := True;
+    Exit;
+  end;
 
-  if LoadStringsFromFile(TmpFile, Lines) and (GetArrayLength(Lines) > 0) then
-    GAVX512Supported := (Trim(Lines[0]) = '1');
+  if not Exec(
+       PythonExe,
+       '-c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"',
+       '', SW_HIDE, ewWaitUntilTerminated, Code) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  Result := Code <> 0;
 end;
 
 
-// ── Detect an NVIDIA GPU with a CUDA 12.8-capable driver ────────────────────
+// ── Detect an NVIDIA GPU with a CUDA 12.4-capable driver ────────────────────
 // nvidia-smi ships with every NVIDIA driver.  Depending on driver generation
 // its banner line reads either
 //   | NVIDIA-SMI 570.86  Driver Version: 570.86   CUDA Version: 12.8     |
@@ -182,12 +221,19 @@ end;
 //   | NVIDIA-SMI 610.62  KMD Version: 610.62      CUDA UMD Version: 13.3 |
 // so the parse anchors on 'CUDA' and takes the number after the following
 // 'Version:'.  That number is the highest CUDA the DRIVER supports; drivers
-// are backward compatible, so >= 12.8 can run the prebuilt CUDA 12.8 wheel.
-// If nvidia-smi is missing (no NVIDIA driver) or reports < 12.8, GCudaOK
-// stays False and the dialog recommends the CPU build instead.
+// are backward compatible, so >= 12.4 can run the bundled CUDA 12.4 runtime.
+// Setup itself is a 32-bit process, so a bare `nvidia-smi` can be redirected to
+// SysWOW64 even though NVIDIA installs it in the real 64-bit System32 folder.
+// Use Windows' Sysnative alias explicitly on 64-bit systems, then fall back to
+// the normal system path/PATH for unusual driver layouts. If nvidia-smi is
+// genuinely missing or reports < 12.4, GCudaOK stays False and the dialog
+// recommends the CPU build instead.
 procedure DetectNvidiaCuda();
 var
-  TmpFile: String;
+  TmpFile:  String;
+  NvidiaSmi: String;
+  CmdExe:   String;
+  Params:   String;
   Lines:   TArrayOfString;
   Code, I, P, DotPos: Integer;
   S, Ver:  String;
@@ -196,8 +242,26 @@ begin
   GCudaOK := False;
 
   TmpFile := ExpandConstant('{tmp}\ga_nvsmi.txt');
-  Exec('cmd.exe', '/c nvidia-smi > "' + TmpFile + '" 2>&1',
-       '', SW_HIDE, ewWaitUntilTerminated, Code);
+  DeleteFile(TmpFile);
+
+  NvidiaSmi := '';
+  if IsWin64 then
+  begin
+    NvidiaSmi := ExpandConstant('{sysnative}\nvidia-smi.exe');
+    if not FileExists(NvidiaSmi) then
+      NvidiaSmi := '';
+  end;
+  if NvidiaSmi = '' then
+  begin
+    NvidiaSmi := ExpandConstant('{sys}\nvidia-smi.exe');
+    if not FileExists(NvidiaSmi) then
+      NvidiaSmi := 'nvidia-smi.exe';  // final PATH fallback
+  end;
+
+  CmdExe := ExpandConstant('{cmd}');
+  Params := '/d /c ""' + NvidiaSmi + '" > "' + TmpFile + '" 2>&1"';
+  Code := -1;
+  if not Exec(CmdExe, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) then Exit;
   if Code <> 0 then Exit;
 
   if not LoadStringsFromFile(TmpFile, Lines) then Exit;
@@ -219,7 +283,7 @@ begin
     begin
       Major := StrToIntDef(Copy(Ver, 1, DotPos - 1), 0);
       Minor := StrToIntDef(Copy(Ver, DotPos + 1, 3), -1);
-      GCudaOK := (Major > 12) or ((Major = 12) and (Minor >= 8));
+      GCudaOK := (Major > 12) or ((Major = 12) and (Minor >= 4));
     end;
     Exit;
   end;
@@ -260,8 +324,8 @@ end;
 //   LblPkg  - "Installing pillow  (2 / 3)..."  updated before each pip call
 //   LblDone - running tick list, e.g. "OK: pystray   OK: pillow   FAIL: pynput"
 // Any packages that fail are collected and shown in an error dialog at the end.
-procedure InstallWithProgress(const Packages: TArrayOfString;
-                              const GroupTitle: String);
+function InstallWithProgress(const Packages: TArrayOfString;
+                             const GroupTitle: String): Boolean;
 var
   Form:      TForm;
   LblPkg:    TLabel;
@@ -273,6 +337,7 @@ var
   DoneLine:  String;
 begin
   Total := GetArrayLength(Packages);
+  Result := True;
   if Total = 0 then Exit;
 
   Failed   := '';
@@ -325,13 +390,15 @@ begin
         '  (' + IntToStr(I + 1) + ' / ' + IntToStr(Total) + ')...';
       LblPkg.Refresh;
 
-      Exec(GPythonExe,
-           '-m pip install --quiet --disable-pip-version-check ' + Packages[I],
-           '', SW_HIDE, ewWaitUntilTerminated, Code);
-
-      if Code = 0 then
-        DoneLine := DoneLine + 'OK: ' + Packages[I] + '   '
+      if Exec(GPythonExe,
+              '-m pip install --quiet --disable-pip-version-check ' +
+              '--no-warn-script-location --log "' + GInstallLogFile + '" ' + Packages[I],
+              '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
+      begin
+        DoneLine := DoneLine + 'OK: ' + Packages[I] + '   ';
+      end
       else begin
+        Result   := False;
         DoneLine := DoneLine + 'FAIL: ' + Packages[I] + '   ';
         Failed   := Failed + '  ' + Packages[I] + #13#10;
       end;
@@ -354,8 +421,8 @@ begin
       MsgBox(
         'The following packages could not be installed:' + #13#10 + #13#10 +
         Failed + #13#10 +
-        'You can retry manually in a Command Prompt with:' + #13#10 +
-        '  "' + GPythonExe + '" -m pip install <package>',
+        'The detailed pip log is here:' + #13#10 +
+        '  ' + GInstallLogFile,
         mbError, MB_OK);
 
   finally
@@ -364,252 +431,223 @@ begin
 end;
 
 
-// ── AI engine: llama-cpp-python ──────────────────────────────────────────────
-// Radio-button dialog lets the user choose CPU (latest) or GPU (v0.3.16).
-// The pre-selected/recommended option follows hardware detection: GPU when an
-// NVIDIA driver supporting CUDA 12.8 is present (GCudaOK), CPU otherwise.
-// The engine is never pre-installed when this runs: [InstallDelete] wipes
-// {app}\python before every install, so there is no upgrade path to handle.
-// CPU path: installs via the official abetlen CPU wheel index.
-// GPU path: downloads the 226 MB community CUDA 12.8 wheel via urllib then pip.
-procedure CheckLlamaCpp();
+// ── Managed local engine: current llama-server ───────────────────────────────
+// The server process is versioned independently from Vedium's private Python,
+// so new GGUF architectures do not require a compatible Python native wheel.
+// CUDA installs include the matching runtime DLL archive; users need a recent
+// NVIDIA driver, but do not need to install the CUDA toolkit themselves.
+function DownloadEngineArchive(Url, DestFile, Description: String): Boolean;
 var
-  Form:             TForm;
-  Intro:            TNewStaticText;
-  LblCPU:           TNewStaticText;
-  LblGPU:           TNewStaticText;
-  LblSkip:          TNewStaticText;
-  RbCPU:            TRadioButton;
-  RbGPU:            TRadioButton;
-  RbSkip:           TRadioButton;
-  BtnOK:            TNewButton;
-  Margin:           Integer;
-  ContentW:         Integer;
-  Y, Code:          Integer;
-  IntroText:        String;
-  GpuText:          String;
-  PipSpec:          String;
-  PkgArray:         TArrayOfString;
-  WheelUrl:         String;
-  WheelFile:        String;
-  DlFile:           String;
-  DlScript:         String;
+  ScriptFile: String;
+  ScriptText: String;
+  Code: Integer;
+  WindowMode: Integer;
 begin
-  // ── Build choice dialog ───────────────────────────────────────────────────
-  // All coordinates are wrapped in ScaleX/ScaleY so the layout grows with the
-  // dialog font on high-DPI displays.  Radio buttons cannot word-wrap, so each
-  // option has a SHORT one-line radio caption plus a separate word-wrapped
-  // description beneath it (TNewStaticText — see CreateWrappedText).
-  Form := TForm.Create(nil);
-  try
-    Form.Caption     := 'Vedium — AI Engine';
-    Form.ClientWidth := ScaleX(620);
-    Form.Position    := poScreenCenter;
-    Form.BorderStyle := bsDialog;
+  Result := FileExists(DestFile);
+  if Result then Exit;
 
-    Margin   := ScaleX(20);
-    ContentW := Form.ClientWidth - (Margin * 2);
-    Y        := ScaleY(16);
+  ForceDirectories(ExtractFileDir(DestFile));
+  ScriptFile := ExpandConstant('{tmp}\vedium_engine_download.py');
+  ScriptText :=
+    'import sys, urllib.request' + #13#10 +
+    'url, dest, label = sys.argv[1:4]' + #13#10 +
+    'print("Downloading " + label + "...")' + #13#10 +
+    'urllib.request.urlretrieve(url, dest)' + #13#10;
+  if not SaveStringToFile(ScriptFile, ScriptText, False) then Exit;
 
-    // ── Intro paragraph ──────────────────────────────────────────────────────
-    IntroText :=
-      'llama-cpp-python is the engine that runs AI models locally on this ' +
-      'computer. It is not installed yet.' + #13#10 + #13#10 +
-      'Planning to use a cloud AI service (API key) or a CLI backend instead ' +
-      'of a local model? Then no engine and no powerful hardware are needed — ' +
-      'choose Skip.';
-    Intro := CreateWrappedText(Form, Margin, Y, ContentW, IntroText);
-    Y := Intro.Top + Intro.Height + ScaleY(16);
+  Code := -1;
+  if WizardSilent then WindowMode := SW_HIDE else WindowMode := SW_SHOW;
+  Exec(
+    GPythonExe,
+    '"' + ScriptFile + '" "' + Url + '" "' + DestFile + '" "' + Description + '"',
+    '', WindowMode, ewWaitUntilTerminated, Code);
+  Result := (Code = 0) and FileExists(DestFile);
+  if not Result then DeleteFile(DestFile);
+end;
 
-    // ── CPU option ───────────────────────────────────────────────────────────
-    RbCPU := TRadioButton.Create(Form);
-    RbCPU.Parent  := Form;
-    RbCPU.Left    := Margin;
-    RbCPU.Top     := Y;
-    RbCPU.Width   := ContentW;
-    RbCPU.Height  := ScaleY(20);
-    if GAVX512Supported then
-      RbCPU.Caption := 'CPU build — latest (AVX-512)'
-    else
-      RbCPU.Caption := 'CPU build — v0.3.19 (AVX2 compatible)';
-    if not GCudaOK then
-      RbCPU.Caption := RbCPU.Caption + '     [recommended for this PC]';
-    RbCPU.Checked := not GCudaOK;
-    Y := RbCPU.Top + RbCPU.Height + ScaleY(2);
 
-    if GAVX512Supported then
-      LblCPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
-        'Runs the model on the processor — works on any PC. Installs the newest ' +
-        'version (AVX-512 detected). Supports Gemma 3, Qwen3, and most models.')
-    else
-      LblCPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
-        'Runs the model on the processor — works on any PC. Your CPU supports ' +
-        'AVX2 but not AVX-512, so the stable v0.3.19 build is used. Supports ' +
-        'Qwen3 and most models.');
-    Y := LblCPU.Top + LblCPU.Height + ScaleY(14);
+function ExtractServerArchives(
+  DestDir, MainArchive, RuntimeArchive, MarkerValue: String): Boolean;
+var
+  ScriptFile: String;
+  ScriptText: String;
+  Code: Integer;
+  MarkerFile: String;
+begin
+  Result := False;
+  ScriptFile := ExpandConstant('{tmp}\vedium_engine_extract.py');
+  ScriptText :=
+    'import pathlib, shutil, sys, zipfile' + #13#10 +
+    'dest = pathlib.Path(sys.argv[1])' + #13#10 +
+    'archives = [pathlib.Path(p) for p in sys.argv[2:] if p]' + #13#10 +
+    'if dest.exists(): shutil.rmtree(dest)' + #13#10 +
+    'dest.mkdir(parents=True, exist_ok=True)' + #13#10 +
+    'for archive in archives:' + #13#10 +
+    '    with zipfile.ZipFile(archive) as z: z.extractall(dest)' + #13#10;
+  if not SaveStringToFile(ScriptFile, ScriptText, False) then Exit;
 
-    // ── GPU option ───────────────────────────────────────────────────────────
-    RbGPU := TRadioButton.Create(Form);
-    RbGPU.Parent  := Form;
-    RbGPU.Left    := Margin;
-    RbGPU.Top     := Y;
-    RbGPU.Width   := ContentW;
-    RbGPU.Height  := ScaleY(20);
-    RbGPU.Caption := 'GPU build — v0.3.16 (NVIDIA)';
-    if GCudaOK then
-      RbGPU.Caption := RbGPU.Caption + '     [recommended for this PC]';
-    RbGPU.Checked := GCudaOK;
-    Y := RbGPU.Top + RbGPU.Height + ScaleY(2);
+  Code := -1;
+  Exec(
+    GPythonExe,
+    '"' + ScriptFile + '" "' + DestDir + '" "' + MainArchive + '" "' + RuntimeArchive + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
+  if (Code <> 0) or not FileExists(DestDir + '\llama-server.exe') then Exit;
 
-    if GCudaOK then
-      GpuText :=
-        'An NVIDIA GPU with a CUDA 12.8-capable driver was detected on this PC ' +
-        '— this is the fastest option for you. Supports Gemma 3 and Qwen3. ' +
-        'Downloads a 226 MB wheel; a console window will show progress.'
-    else
-      GpuText :=
-        'Requires an NVIDIA GPU with a CUDA 12.8-capable driver — none was ' +
-        'detected on this PC. Supports Gemma 3 and Qwen3. Downloads a 226 MB ' +
-        'wheel; a console window will show progress.';
-    LblGPU := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
-                                GpuText);
-    Y := LblGPU.Top + LblGPU.Height + ScaleY(14);
+  MarkerFile := ExpandConstant('{app}\llama-server\.vedium-server-version');
+  ForceDirectories(ExtractFileDir(MarkerFile));
+  SaveStringToFile(MarkerFile, MarkerValue + #13#10, False);
+  Result := True;
+end;
 
-    // ── Skip option ──────────────────────────────────────────────────────────
-    RbSkip := TRadioButton.Create(Form);
-    RbSkip.Parent  := Form;
-    RbSkip.Left    := Margin;
-    RbSkip.Top     := Y;
-    RbSkip.Width   := ContentW;
-    RbSkip.Height  := ScaleY(20);
-    RbSkip.Caption := 'Skip — cloud / CLI mode, or install the engine later';
-    Y := RbSkip.Top + RbSkip.Height + ScaleY(2);
 
-    LblSkip := CreateWrappedText(Form, Margin + ScaleX(22), Y, ContentW - ScaleX(22),
-      'Vedium works without a local engine when a cloud API key or a CLI ' +
-      'backend is set up in Settings. You can add the local engine any time.');
-    Y := LblSkip.Top + LblSkip.Height + ScaleY(18);
+procedure CheckManagedLlamaServer();
+var
+  ServerBuild: String;
+  BaseUrl: String;
+  Choice: Integer;
+  ServerRoot: String;
+  ServerDir: String;
+  ServerExe: String;
+  CacheDir: String;
+  MainArchive: String;
+  RuntimeArchive: String;
+  MainUrl: String;
+  RuntimeUrl: String;
+  MarkerFile: String;
+  MarkerValue: String;
+  Lines: TArrayOfString;
+  Code: Integer;
+  IsGPU: Boolean;
+  EngineChoice: String;
+begin
+  ServerBuild := 'b10327';
+  BaseUrl := 'https://github.com/ggml-org/llama.cpp/releases/download/' + ServerBuild + '/';
+  GEngineInstalled := False;
+  ServerRoot := ExpandConstant('{app}\llama-server');
+  MarkerFile := ServerRoot + '\.vedium-server-version';
 
-    // ── Continue button (centred) ────────────────────────────────────────────
-    BtnOK := TNewButton.Create(Form);
-    BtnOK.Parent      := Form;
-    BtnOK.Caption     := 'Continue';
-    BtnOK.Width       := ScaleX(110);
-    BtnOK.Height      := ScaleY(30);
-    BtnOK.Left        := (Form.ClientWidth - BtnOK.Width) div 2;
-    BtnOK.Top         := Y;
-    BtnOK.ModalResult := mrOK;
-    BtnOK.Default     := True;
-    Y := BtnOK.Top + BtnOK.Height + ScaleY(16);
-    Form.ClientHeight := Y;
-
-    if Form.ShowModal <> mrOK then Exit;
-
-    // ── CPU path — pick version based on detected CPU instruction set ────────
-    // AVX-512 CPUs (most Intel 12th gen+, Xeon): install latest from cpu index.
-    // AVX2-only CPUs (all AMD Ryzen, older Intel): pin to v0.3.19 — the latest
-    // wheels on the cpu index are compiled with AVX-512 and crash with
-    // WinError 0xC000001D (STATUS_ILLEGAL_INSTRUCTION) on AVX2-only machines.
-    // --only-binary prevents pip from trying to compile from source (needs MSVC).
-    if RbCPU.Checked then
+  // Incremental reinstall: retain a verified current server and all of its
+  // runtime DLLs. Code-only updates do not redownload hundreds of megabytes.
+  if LoadStringsFromFile(MarkerFile, Lines) and (GetArrayLength(Lines) > 0) then
+  begin
+    MarkerValue := Trim(Lines[0]);
+    if Pos(ServerBuild, MarkerValue) = 1 then
     begin
-      SetArrayLength(PkgArray, 1);
-      if GAVX512Supported then
-      begin
-        PkgArray[0] := '--upgrade --only-binary llama-cpp-python ' +
-                       '--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu ' +
-                       'llama-cpp-python';
-        InstallWithProgress(PkgArray, 'Installing AI engine — CPU build (latest, AVX-512)');
-        GInstalledSummary :=
-          GInstalledSummary +
-          '  ' + #$2713 + '  llama-cpp-python    (CPU build — latest, AVX-512 optimised)' + #13#10;
-      end
+      if Pos('-cuda', MarkerValue) > 0 then
+        ServerExe := ServerRoot + '\cuda\llama-server.exe'
       else
+        ServerExe := ServerRoot + '\cpu\llama-server.exe';
+      if FileExists(ServerExe) and
+         Exec(ServerExe, '--version', ExtractFileDir(ServerExe),
+              SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0) then
       begin
-        PkgArray[0] := '--only-binary llama-cpp-python ' +
-                       '--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu ' +
-                       'llama-cpp-python==0.3.19';
-        InstallWithProgress(PkgArray, 'Installing AI engine — CPU build v0.3.19 (AVX2)');
-        GInstalledSummary :=
-          GInstalledSummary +
-          '  ' + #$2713 + '  llama-cpp-python    (CPU build v0.3.19 — AVX2 compatible)' + #13#10;
-      end;
-    end
-
-    // ── GPU path — download prebuilt CUDA 12.8 wheel then pip-install it ─────
-    else if RbGPU.Checked then
-    begin
-      WheelUrl  := 'https://huggingface.co/boneylizardwizard/' +
-                   'llama_cpp_python-0.3.16-cp312-cp312-win_amd64/resolve/main/' +
-                   'llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl';
-      WheelFile := ExpandConstant('{tmp}') + '\llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl';
-
-      MsgBox(
-        'The GPU wheel will now be downloaded (~226 MB).' + #13#10 + #13#10 +
-        'A console window will open showing download progress.' + #13#10 +
-        'Do NOT close it — the installer continues when the download is done.' + #13#10 + #13#10 +
-        'Click OK to begin.',
-        mbInformation, MB_OK);
-
-      // Run the download from a temp script rather than a -c one-liner —
-      // string literals inside a quoted -c argument need escaping that cmd,
-      // Inno and Python all disagree about.
-      DlFile   := ExpandConstant('{tmp}\ga_wheel_dl.py');
-      DlScript :=
-        'import urllib.request' + #13#10 +
-        'print("Downloading the GPU wheel (~226 MB)...")' + #13#10 +
-        'urllib.request.urlretrieve(r"' + WheelUrl + '", r"' + WheelFile + '")' + #13#10;
-
-      if not SaveStringToFile(DlFile, DlScript, False) then
-      begin
-        MsgBox('Could not create the download helper. Skipping the engine install.',
-               mbError, MB_OK);
+        GEngineInstalled := True;
+        GInstalledSummary := GInstalledSummary +
+          '  ' + #$2713 + '  llama-server ' + MarkerValue +
+          '    (existing managed engine — reused)' + #13#10;
         Exit;
       end;
-
-      Exec(GPythonExe, '"' + DlFile + '"', '', SW_SHOW, ewWaitUntilTerminated, Code);
-
-      if (Code <> 0) or not FileExists(WheelFile) then
-      begin
-        MsgBox(
-          'Download failed.' + #13#10 + #13#10 +
-          'You can install the GPU build manually after setup — see' + #13#10 +
-          'GPU_INSTALL_GUIDE.md in the Vedium GitHub repository.',
-          mbError, MB_OK);
-        Exit;
-      end;
-
-      SetArrayLength(PkgArray, 1);
-      PkgArray[0] := WheelFile;
-      InstallWithProgress(PkgArray, 'Installing AI engine — GPU v0.3.16');
-      GInstalledSummary :=
-        GInstalledSummary +
-        '  ' + #$2713 + '  llama-cpp-python    (GPU build v0.3.16 — set GPU to Auto in Settings)' + #13#10;
-    end
-
-    // ── Skip ─────────────────────────────────────────────────────────────────
-    else
-    begin
-      if GAVX512Supported then
-        PipSpec := 'llama-cpp-python'
-      else
-        PipSpec := 'llama-cpp-python==0.3.19';
-      MsgBox(
-        'Skipped — cloud API and CLI modes work without the local engine;' + #13#10 +
-        'local models will not work until it is installed.' + #13#10 + #13#10 +
-        'To add the local engine later, run in a Command Prompt:' + #13#10 +
-        '  "' + GPythonExe + '" -m pip install' + #13#10 +
-        '      --only-binary llama-cpp-python' + #13#10 +
-        '      --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu' + #13#10 +
-        '      ' + PipSpec + #13#10 + #13#10 +
-        'GPU build (NVIDIA + CUDA 12.8 only): see GPU_INSTALL_GUIDE.md' + #13#10 +
-        'in the Vedium GitHub repository.',
-        mbInformation, MB_OK);
     end;
-
-  finally
-    Form.Free;
   end;
+
+  // Named parameters make clean installer smoke tests possible without UI:
+  // /VediumEngine=cpu|cuda|skip and /VediumModel=skip|gemma3|gemma4.
+  EngineChoice := Lowercase(Trim(ExpandConstant('{param:VediumEngine|}')));
+  if EngineChoice = 'skip' then Exit;
+  if EngineChoice = 'cpu' then
+    IsGPU := False
+  else if EngineChoice = 'cuda' then
+  begin
+    if not GCudaOK then
+    begin
+      MsgBox('The requested CUDA engine needs an NVIDIA driver supporting CUDA 12.4 or newer.',
+             mbError, MB_OK);
+      Exit;
+    end;
+    IsGPU := True;
+  end
+  else
+  begin
+    if GCudaOK then
+      Choice := MsgBox(
+        'Choose the engine for local GGUF models:' + #13#10 + #13#10 +
+        'YES — NVIDIA GPU acceleration (recommended; faster)' + #13#10 +
+        'Runs supported models with CUDA. Downloads about 630 MB once,' + #13#10 +
+        'including the CUDA runtime.' + #13#10 + #13#10 +
+        'NO — CPU (same models; slower)' + #13#10 +
+        'Runs the same supported GGUF models entirely on the processor — no' + #13#10 +
+        'GPU is required. Downloads about 18 MB once. Larger models need' + #13#10 +
+        'enough system RAM and will generate more slowly.' + #13#10 + #13#10 +
+        'CANCEL — skip local models (cloud and CLI modes still work).',
+        mbConfirmation, MB_YESNOCANCEL)
+    else
+      Choice := MsgBox(
+        'No compatible NVIDIA CUDA driver was detected.' + #13#10 + #13#10 +
+        'Local GGUF models can still run on your CPU.' + #13#10 + #13#10 +
+        'Choose YES to install the current CPU llama-server engine (~18 MB).' + #13#10 +
+        'It supports the same current GGUF models, but generation is slower.' + #13#10 + #13#10 +
+        'Choose NO to skip local models; cloud and CLI modes still work.',
+        mbConfirmation, MB_YESNO);
+
+    if Choice = IDCANCEL then Exit;
+    if (not GCudaOK) and (Choice = IDNO) then Exit;
+    IsGPU := GCudaOK and (Choice = IDYES);
+  end;
+
+  CacheDir := ExpandConstant('{app}\engine-cache');
+  ForceDirectories(CacheDir);
+  RuntimeArchive := '';
+  RuntimeUrl := '';
+  if IsGPU then
+  begin
+    MarkerValue := ServerBuild + '-cuda12.4';
+    ServerDir := ServerRoot + '\cuda';
+    MainArchive := CacheDir + '\llama-' + ServerBuild + '-bin-win-cuda-12.4-x64.zip';
+    RuntimeArchive := CacheDir + '\cudart-llama-bin-win-cuda-12.4-x64.zip';
+    MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cuda-12.4-x64.zip';
+    RuntimeUrl := BaseUrl + 'cudart-llama-bin-win-cuda-12.4-x64.zip';
+    if not DownloadEngineArchive(MainUrl, MainArchive, 'llama-server CUDA engine') or
+       not DownloadEngineArchive(RuntimeUrl, RuntimeArchive, 'CUDA runtime') then
+    begin
+      MsgBox('The managed GPU engine download failed. Run setup again to retry.',
+             mbError, MB_OK);
+      Exit;
+    end;
+  end
+  else
+  begin
+    MarkerValue := ServerBuild + '-cpu';
+    ServerDir := ServerRoot + '\cpu';
+    MainArchive := CacheDir + '\llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
+    MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
+    if not DownloadEngineArchive(MainUrl, MainArchive, 'llama-server CPU engine') then
+    begin
+      MsgBox('The managed CPU engine download failed. Run setup again to retry.',
+             mbError, MB_OK);
+      Exit;
+    end;
+  end;
+
+  if not ExtractServerArchives(
+       ServerDir, MainArchive, RuntimeArchive, MarkerValue) then
+  begin
+    MsgBox('The managed local engine could not be extracted.', mbError, MB_OK);
+    Exit;
+  end;
+
+  ServerExe := ServerDir + '\llama-server.exe';
+  if Exec(ServerExe, '--version', ServerDir, SW_HIDE,
+          ewWaitUntilTerminated, Code) and (Code = 0) then
+  begin
+    GEngineInstalled := True;
+    GInstalledSummary := GInstalledSummary +
+      '  ' + #$2713 + '  llama-server ' + MarkerValue +
+      '    (managed local GGUF engine)' + #13#10;
+  end
+  else
+    MsgBox(
+      'The managed engine was downloaded but could not start.' + #13#10 +
+      'Run setup again or choose the CPU engine.', mbError, MB_OK);
 end;
 
 
@@ -704,12 +742,13 @@ begin
 end;
 
 
-// ── Download the Gemma 3 model with a live percentage progress bar ───────────
+// ── Download a recommended model with a live percentage progress bar ─────────
 // urllib reports bytes via a reporthook, so we can show TRUE progress (not just
 // a spinner).  The download runs as a detached process (ewNoWait) that writes
 // the current percent to a temp file; the wizard polls that file and drives the
 // progress bar, repainting the form each tick (Refresh) so the bar animates.
-function DownloadModelWithProgress(const Url, Dest: String): Boolean;
+function DownloadModelWithProgress(
+  const Url, Dest, ModelName, SizeLabel: String): Boolean;
 var
   PyFile, ProgFile, DoneFile: String;
   Script: String;
@@ -756,7 +795,7 @@ begin
 
   Form := TForm.Create(nil);
   try
-    Form.Caption      := 'Vedium — Downloading Gemma 3 model';
+    Form.Caption      := 'Vedium — Downloading ' + ModelName;
     Form.ClientWidth  := ScaleX(480);
     Form.ClientHeight := ScaleY(90);
     Form.Position     := poScreenCenter;
@@ -768,7 +807,7 @@ begin
     Lbl.Top      := ScaleY(16);
     Lbl.Width    := Form.ClientWidth - ScaleX(32);
     Lbl.AutoSize := False;
-    Lbl.Caption  := 'Starting download (~2.5 GB)...';
+    Lbl.Caption  := 'Starting download (' + SizeLabel + ')...';
 
     Bar := TNewProgressBar.Create(Form);
     Bar.Parent   := Form;
@@ -800,7 +839,7 @@ begin
         if Pct < 0 then Pct := 0;
         if Pct > 100 then Pct := 100;
         Bar.Position := Pct;
-        Lbl.Caption  := 'Downloading Gemma 3 model...  ' + IntToStr(Pct) + '%';
+        Lbl.Caption  := 'Downloading ' + ModelName + '...  ' + IntToStr(Pct) + '%';
       end;
       Form.Refresh;
       Sleep(300);
@@ -837,35 +876,201 @@ begin
 end;
 
 
+// ── Choose between the two tested recommended models ────────────────────────
+// Gemma 4 is pre-selected when a compatible NVIDIA driver was detected;
+// Gemma 3 is pre-selected on CPU-only systems. Both remain available so the
+// user can trade download size and speed against output quality.
+function ChooseRecommendedModel(): String;
+var
+  Form: TForm;
+  RbGemma4: TRadioButton;
+  RbGemma3: TRadioButton;
+  RbSkip: TRadioButton;
+  BtnContinue: TNewButton;
+  Intro: TNewStaticText;
+  Gemma4Desc: TNewStaticText;
+  Gemma3Desc: TNewStaticText;
+  SkipDesc: TNewStaticText;
+  Gemma4Caption: String;
+  Gemma3Caption: String;
+begin
+  Result := 'skip';
+
+  Gemma4Caption := 'Gemma 4 E4B Q4_K_M — best quality (~5.0 GB)';
+  Gemma3Caption := 'Gemma 3 4B Q4_K_M — lightweight (~2.5 GB)';
+  if GCudaOK then
+    Gemma4Caption := Gemma4Caption + '  [recommended for this PC]'
+  else
+    Gemma3Caption := Gemma3Caption + '  [recommended for this PC]';
+
+  Form := TForm.Create(nil);
+  try
+    Form.Caption      := 'Vedium — Recommended local model';
+    Form.ClientWidth  := ScaleX(640);
+    Form.ClientHeight := ScaleY(350);
+    Form.Position     := poScreenCenter;
+    Form.BorderStyle  := bsDialog;
+
+    Intro := CreateWrappedText(
+      Form, ScaleX(18), ScaleY(16), Form.ClientWidth - ScaleX(36),
+      'Choose a local model. Vedium downloads it once, saves it in the install ' +
+      'folder, and selects it automatically. You can switch models later.');
+
+    RbGemma4 := TRadioButton.Create(Form);
+    RbGemma4.Parent  := Form;
+    RbGemma4.Left    := ScaleX(18);
+    RbGemma4.Top     := ScaleY(68);
+    RbGemma4.Width   := Form.ClientWidth - ScaleX(36);
+    RbGemma4.Caption := Gemma4Caption;
+    RbGemma4.Checked := GCudaOK;
+
+    Gemma4Desc := CreateWrappedText(
+      Form, ScaleX(42), ScaleY(92), Form.ClientWidth - ScaleX(60),
+      'Our tested quality choice, especially for explanations and reading tasks. ' +
+      'It works on CPU too. An 8 GB NVIDIA GPU is a practical fit for typical ' +
+      'use; llama.cpp can use system RAM when full GPU offload is not possible.');
+
+    RbGemma3 := TRadioButton.Create(Form);
+    RbGemma3.Parent  := Form;
+    RbGemma3.Left    := ScaleX(18);
+    RbGemma3.Top     := ScaleY(150);
+    RbGemma3.Width   := Form.ClientWidth - ScaleX(36);
+    RbGemma3.Caption := Gemma3Caption;
+    RbGemma3.Checked := not GCudaOK;
+
+    Gemma3Desc := CreateWrappedText(
+      Form, ScaleX(42), ScaleY(174), Form.ClientWidth - ScaleX(60),
+      'Works on both CPU and GPU. This is the smaller, faster choice for CPU-only ' +
+      'and lower-memory PCs, while remaining a capable writing and grammar model.');
+
+    RbSkip := TRadioButton.Create(Form);
+    RbSkip.Parent  := Form;
+    RbSkip.Left    := ScaleX(18);
+    RbSkip.Top     := ScaleY(232);
+    RbSkip.Width   := Form.ClientWidth - ScaleX(36);
+    RbSkip.Caption := 'Skip — add a model later';
+
+    SkipDesc := CreateWrappedText(
+      Form, ScaleX(42), ScaleY(256), Form.ClientWidth - ScaleX(60),
+      'Use this for cloud or CLI mode, or if you already have another GGUF file.');
+
+    BtnContinue := TNewButton.Create(Form);
+    BtnContinue.Parent      := Form;
+    BtnContinue.Caption     := 'Continue';
+    BtnContinue.Width       := ScaleX(92);
+    BtnContinue.Height      := ScaleY(26);
+    BtnContinue.Left        := Form.ClientWidth - BtnContinue.Width - ScaleX(18);
+    BtnContinue.Top         := Form.ClientHeight - BtnContinue.Height - ScaleY(16);
+    BtnContinue.Default     := True;
+    BtnContinue.ModalResult := mrOK;
+
+    Form.ActiveControl := BtnContinue;
+    if Form.ShowModal <> mrOK then Exit;
+
+    if RbGemma4.Checked then
+      Result := 'gemma4'
+    else if RbGemma3.Checked then
+      Result := 'gemma3';
+  finally
+    Form.Free;
+  end;
+end;
+
+
 // ── Optional model download — offered, never forced ──────────────────────────
 // Called from CurStepChanged at ssPostInstall, after {app} exists and the
 // engine has been installed.
 procedure OfferModelDownload();
 var
   Dest: String;
+  CfgFile: String;
+  ModelChoice: String;
+  ModelUrl: String;
+  ModelFileName: String;
+  ModelName: String;
+  SizeLabel: String;
 begin
-  GModelDownloaded := False;
-  GModelPath       := '';
+  GModelDownloaded     := False;
+  GExistingModelConfig := False;
+  GModelPath           := '';
+  GModelDisplayName    := '';
 
-  if MsgBox(
-       'Download the recommended grammar model now?' + #13#10 + #13#10 +
-       'Gemma 3 (4B, Q4_K_M GGUF) — about 2.5 GB.' + #13#10 +
-       'It will be saved into your install folder and selected automatically.' + #13#10 + #13#10 +
-       'You can also skip this and add a model later from Settings.' + #13#10 + #13#10 +
-       'Download now?',
-       mbConfirmation, MB_YESNO) = IDNO then
+  // A returning user may already point at a model anywhere on disk. Preserve
+  // that configuration and do not repeat the large first-install offer.
+  CfgFile := ExpandConstant('{app}\vedium_config.json');
+  if FileExists(CfgFile) then
+  begin
+    GExistingModelConfig := True;
+    GInstalledSummary := GInstalledSummary +
+      '  ' + #$2713 + '  Existing model/backend configuration preserved' + #13#10;
     Exit;
+  end;
+
+  // Recover cleanly if the model file survived a manually interrupted or
+  // partial reinstall but its config did not. Prefer the quality model when
+  // both known files are present.
+  Dest := ExpandConstant('{app}\' + GEMMA4_FILENAME);
+  if FileExists(Dest) then
+  begin
+    GModelDownloaded  := True;
+    GModelPath        := Dest;
+    GModelDisplayName := 'Gemma 4 E4B';
+    WriteModelConfigIfAbsent(Dest);
+    GInstalledSummary := GInstalledSummary +
+      '  ' + #$2713 + '  Gemma 4 E4B model   (existing file reused & selected)' + #13#10;
+    Exit;
+  end;
 
   Dest := ExpandConstant('{app}\' + GEMMA3_FILENAME);
-
-  if DownloadModelWithProgress(GEMMA3_URL, Dest) then
+  if FileExists(Dest) then
   begin
-    GModelDownloaded := True;
-    GModelPath       := Dest;
+    GModelDownloaded  := True;
+    GModelPath        := Dest;
+    GModelDisplayName := 'Gemma 3 4B';
+    WriteModelConfigIfAbsent(Dest);
+    GInstalledSummary := GInstalledSummary +
+      '  ' + #$2713 + '  Gemma 3 4B model    (existing file reused & selected)' + #13#10;
+    Exit;
+  end;
+
+  ModelChoice := Lowercase(Trim(ExpandConstant('{param:VediumModel|}')));
+  if ModelChoice = '' then
+  begin
+    if WizardSilent then
+      ModelChoice := 'skip'
+    else
+      ModelChoice := ChooseRecommendedModel();
+  end;
+
+  if ModelChoice = 'skip' then Exit;
+
+  if ModelChoice = 'gemma4' then
+  begin
+    ModelUrl      := GEMMA4_URL;
+    ModelFileName := GEMMA4_FILENAME;
+    ModelName     := 'Gemma 4 E4B';
+    SizeLabel     := '~5.0 GB';
+  end
+  else if ModelChoice = 'gemma3' then
+  begin
+    ModelUrl      := GEMMA3_URL;
+    ModelFileName := GEMMA3_FILENAME;
+    ModelName     := 'Gemma 3 4B';
+    SizeLabel     := '~2.5 GB';
+  end
+  else
+    Exit;
+
+  Dest := ExpandConstant('{app}\' + ModelFileName);
+  if DownloadModelWithProgress(ModelUrl, Dest, ModelName, SizeLabel) then
+  begin
+    GModelDownloaded  := True;
+    GModelPath        := Dest;
+    GModelDisplayName := ModelName;
     WriteModelConfigIfAbsent(Dest);
     GInstalledSummary :=
       GInstalledSummary +
-      '  ' + #$2713 + '  Gemma 3 model       (downloaded & pre-selected)' + #13#10;
+      '  ' + #$2713 + '  ' + ModelName + ' model  (downloaded & pre-selected)' + #13#10;
   end;
 end;
 
@@ -882,14 +1087,27 @@ begin
     // portable Python that now lives in {app}\python. Nothing outside the
     // install folder is inspected or modified.
     GPythonExe        := ExpandConstant('{app}\python\python.exe');
+    GInstallLogFile   := ExpandConstant('{app}\install-dependencies.log');
+    GEngineInstalled  := False;
+    GExistingModelConfig := False;
+    // Written after [Files] finishes. On the next reinstall, [InstallDelete]
+    // compares it with PythonBundleVersion before deciding whether to retain
+    // or refresh the private runtime.
+    SaveStringToFile(
+      ExpandConstant('{app}\python\.vedium-bundle-version'),
+      '{#PythonBundleVersion}' + #13#10,
+      False);
+    DeleteFile(GInstallLogFile);
     GInstalledSummary :=
       '  ' + #$2713 + '  Portable Python 3.12  (private to Vedium, tkinter + UI packages included)' + #13#10;
 
-    DetectAVX512();
     DetectNvidiaCuda();
-    CheckLlamaCpp();
+    CheckManagedLlamaServer();
     InstallUIDeps();   // safety net — the bundle ships these pre-installed
-    OfferModelDownload();
+    // Do not encourage a large model download when the engine needed to run
+    // it was skipped or failed verification.
+    if GEngineInstalled then
+      OfferModelDownload();
   end;
 
   if CurStep = ssDone then
@@ -903,24 +1121,37 @@ begin
 
     // ── Model block: skip the "go download one" instructions if we already
     //    fetched the model during install. ───────────────────────────────────
-    if GModelDownloaded then
+    if not GEngineInstalled then
+      ModelBlock :=
+        '── Local model engine ─────────────────────────────' + #13#10 +
+        'The local AI engine was skipped or could not be installed, so local' + #13#10 +
+        'GGUF models are not available yet. Python 3.12 is installed correctly.' + #13#10 +
+        'Run the installer again and choose a local CPU or GPU engine.' + #13#10 +
+        'Cloud API, CLI, and manually configured server modes are unaffected.' + #13#10 + #13#10
+    else if GExistingModelConfig then
       ModelBlock :=
         '── Grammar / LLM model ─────────────────────────────' + #13#10 +
-        'The Gemma 3 model is installed and already selected — you are ready' + #13#10 +
+        'Your existing model and backend configuration was preserved. Vedium' + #13#10 +
+        'will keep using the model or backend you selected previously.' + #13#10 + #13#10
+    else if GModelDownloaded then
+      ModelBlock :=
+        '── Grammar / LLM model ─────────────────────────────' + #13#10 +
+        'The ' + GModelDisplayName + ' model is installed and already selected — you are ready' + #13#10 +
         'to go. To switch models later, use Settings → Browse next to' + #13#10 +
         '"Model (.gguf)".' + #13#10 + #13#10
     else
       ModelBlock :=
         '── Grammar / LLM model ─────────────────────────────' + #13#10 +
-        'You still need a GGUF model file (2-3 GB). Recommended:' + #13#10 + #13#10 +
-        '  Gemma 3 (4B):  unsloth/gemma-3-4b-it-GGUF' + #13#10 +
-        '  Qwen3 (4B):    chaparro2001/Qwen3-4B-Instruct-2507-Q4_K_M-GGUF' + #13#10 + #13#10 +
-        'Note: Gemma 4 is NOT supported by this build''s engine — use Gemma 3.' + #13#10 + #13#10 +
+        'You still need a GGUF model file. Recommended:' + #13#10 + #13#10 +
+        '  Best quality (~5.0 GB): lmstudio-community/gemma-4-E4B-it-GGUF' + #13#10 +
+        '  Lightweight  (~2.5 GB): unsloth/gemma-3-4b-it-GGUF' + #13#10 + #13#10 +
+        'Current managed-engine builds support Gemma 4 and Qwen3.5 GGUF files.' + #13#10 + #13#10 +
         'Search Hugging Face for the model name above, download the .gguf' + #13#10 +
         'file, then in Settings click Browse next to "Model (.gguf)".' + #13#10 +
         'Leave "Prompt format" on Auto. Click Save & Load Model.' + #13#10 + #13#10;
 
-    MsgBox(
+    if not WizardSilent then
+      MsgBox(
       'Vedium is installed!' + #13#10 + #13#10 +
       SummaryBlock +
       ModelBlock +
@@ -937,10 +1168,17 @@ Type: files; Name: "{app}\vedium_config.json"
 ; Pre-rename config name, in case this install was upgraded from GrammarAnywhere
 Type: files; Name: "{app}\spell_daemon_config.json"
 Type: files; Name: "{app}\run.bat"
+Type: files; Name: "{app}\install-engine.log"
+Type: files; Name: "{app}\install-dependencies.log"
+Type: files; Name: "{app}\managed-server.log"
+; Managed llama-server and its backend/runtime DLLs.
+Type: filesandordirs; Name: "{app}\llama-server"
+; Versioned engine downloads are retained across reinstalls but removed on a true uninstall.
+Type: filesandordirs; Name: "{app}\engine-cache"
 ; Models downloaded by the installer (or later by the user) into the app folder
 Type: files; Name: "{app}\*.gguf"
-; Bundled Python — [Files] entries are removed automatically, but packages
-; pip-installed at install time (the AI engine) would otherwise linger
+; Bundled Python — removes runtime caches and any dependency-repair packages
+; that were not part of the original [Files] manifest.
 Type: filesandordirs; Name: "{app}\python"
 ; App package — removes runtime __pycache__ dirs that [Files] doesn't know
 ; about, plus a pre-rename spell_daemon dir if upgrading from before v1.2

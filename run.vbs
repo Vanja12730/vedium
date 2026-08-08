@@ -1,3 +1,6 @@
+' Copyright (C) 2026 vehab
+' SPDX-License-Identifier: GPL-3.0-only
+
 ' run.vbs — Launch Vedium without a console window.
 ' Interpreter preference (mirrors run_spell.bat):
 '   1. portable Python bundled by the installer (python\ next to this script)

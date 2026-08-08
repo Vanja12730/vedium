@@ -1,7 +1,10 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Dependency-free tests for the standalone CLI model module.
 
 No installed CLI is executed and no subscription request is made.
-Run with: python cli_models_tests.py
+Run with: python tests/cli_models_tests.py
 """
 
 import json
@@ -12,7 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 
-MODULE_PATH = Path(__file__).resolve().parent / "vedium" / "cli_models.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "vedium" / "cli_models.py"
 SPEC = importlib.util.spec_from_file_location("vedium_cli_models_test_target", MODULE_PATH)
 assert SPEC and SPEC.loader
 cli_models = importlib.util.module_from_spec(SPEC)
@@ -94,12 +97,18 @@ def test_codex_discovery_default_and_fallback():
 
 
 def test_antigravity_models_come_from_the_cli_and_are_cached():
-    listed = "gemini-3.6-flash-high\n\ngemini-3.6-flash-low\nGPT-OSS 120B (Medium)\n"
+    listed = (
+        "gemini-3.6-flash-high\tGemini 3.6 Flash (High)\n\n"
+        "gemini-3.6-flash-low\tGemini 3.6 Flash (Low)\n"
+        "GPT-OSS 120B (Medium)\n"
+    )
     done = subprocess.CompletedProcess([], 0, stdout=listed, stderr="")
     with mock.patch.object(cli_models, "_agy_models_cache", None), \
             mock.patch.object(cli_models.subprocess, "run", return_value=done) as run:
         assert cli_models.discover_antigravity_models(r"C:\bin\agy.exe") == [
-            "gemini-3.6-flash-high", "gemini-3.6-flash-low", "GPT-OSS 120B (Medium)",
+            "gemini-3.6-flash-high\tGemini 3.6 Flash (High)",
+            "gemini-3.6-flash-low\tGemini 3.6 Flash (Low)",
+            "GPT-OSS 120B (Medium)",
         ]
         assert run.call_args.args[0] == [r"C:\bin\agy.exe", "models"]
         # Second call is served from the cache; refresh=True re-runs the CLI.
@@ -122,7 +131,10 @@ def test_detection_and_disabled_selection():
     def resolve(name):
         return fr"C:\bin\{name}.cmd"
 
-    agy_listed = ["gemini-3.6-flash-low", "Claude Opus 4.6 (Thinking)"]
+    agy_listed = [
+        "gemini-3.6-flash-low\tGemini 3.6 Flash (Low)",
+        "Claude Opus 4.6 (Thinking)",
+    ]
     with tempfile.TemporaryDirectory() as tmp, \
             mock.patch.object(cli_models, "resolve_cli", side_effect=resolve), \
             mock.patch.object(cli_models, "discover_codex_models", return_value=[]), \
@@ -146,7 +158,7 @@ def test_detection_and_disabled_selection():
         # into an id, so ids stay stable across the agy naming change.
         assert detected["antigravity"]["models"][1] == {
             "id": "agy-gemini-3.6-flash-low",
-            "label": "gemini-3.6-flash-low (Antigravity CLI)",
+            "label": "Gemini 3.6 Flash (Low) (Antigravity CLI)",
             "efforts": [],
             "agy_model": "gemini-3.6-flash-low",
         }
@@ -155,6 +167,35 @@ def test_detection_and_disabled_selection():
         assert len(cli_models.selectable_models(True, tmp)) == (
             len(cli_models.CLAUDE_ALIASES) + 1 + 1 + len(agy_listed)
         )
+
+
+def test_antigravity_model_entries_handle_output_format_drift():
+    entries = cli_models.antigravity_model_entries([
+        "gemini-3.6-flash-medium\tGemini 3.6 Flash (Medium)",
+        "gpt-oss-120b-medium  GPT-OSS 120B (Medium)",
+        "gemini-3.6-flash-medium\tDuplicate label is ignored",
+        "gemini-legacy-slug",
+        "Claude Opus 4.6 (Thinking)",
+        "MODEL\tDISPLAY NAME",
+        "",
+    ])
+    assert entries[1] == {
+        "id": "agy-gemini-3.6-flash-medium",
+        "label": "Gemini 3.6 Flash (Medium) (Antigravity CLI)",
+        "efforts": [],
+        "agy_model": "gemini-3.6-flash-medium",
+    }
+    assert entries[2] == {
+        "id": "agy-gpt-oss-120b-medium",
+        "label": "GPT-OSS 120B (Medium) (Antigravity CLI)",
+        "efforts": [],
+        "agy_model": "gpt-oss-120b-medium",
+    }
+    assert entries[3]["id"] == "agy-gemini-legacy-slug"
+    assert entries[3]["agy_model"] == "gemini-legacy-slug"
+    assert entries[4]["id"] == "agy-claude-opus-4.6-thinking"
+    assert entries[4]["agy_model"] == "Claude Opus 4.6 (Thinking)"
+    assert len(entries) == 5
 
 
 def test_effort_clamping():
@@ -352,7 +393,7 @@ def test_run_agy_rejects_silent_model_substitution():
 
 
 def test_converse_routes_antigravity_models():
-    listed = ["gemini-3.6-flash-low"]
+    listed = ["gemini-3.6-flash-low\tGemini 3.6 Flash (Low)"]
     with mock.patch.object(cli_models, "resolve_cli", return_value="agy.exe"), \
             mock.patch.object(cli_models, "discover_antigravity_models",
                               return_value=listed), \
@@ -454,6 +495,7 @@ def main() -> int:
         test_run_codex_command_output_and_cleanup,
         test_run_codex_timeout_cleans_output,
         test_antigravity_models_come_from_the_cli_and_are_cached,
+        test_antigravity_model_entries_handle_output_format_drift,
         test_run_agy_command_and_log_verification,
         test_run_agy_rejects_silent_model_substitution,
         test_converse_routes_antigravity_models,

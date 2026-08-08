@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Behaviour tab: language, spell-check mode, and advanced trigger options."""
 
 import tkinter as tk
@@ -48,7 +51,7 @@ def _build_behaviour_tab(ui):
     lf = tk.Frame(frm_behaviour, bg=BG)
     lf.grid(row=0, column=1, sticky="w", pady=7)
     lang_cb = ttk.Combobox(lf, textvariable=lang_var, values=WORKING_LANGUAGE_OPTIONS,
-                           state="readonly", font=FONT_B, width=12)
+                           state="readonly", font=FONT_B, width=14)
     lang_cb.pack(anchor="w")
     _bind_scroll(lang_cb)
     lang_cb.bind("<<ComboboxSelected>>", lambda _e: _commit(

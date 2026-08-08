@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import collections
 import os
 import re
@@ -32,6 +35,9 @@ DEFAULT_CFG = {
     "server_url":             "",
     "auto_detect_server":     True,
     "server_disable_thinking": True,
+    # The installer places the local-GGUF engine under {app}/llama-server. An
+    # explicit path is mainly for development and portable/manual installations.
+    "managed_server_path":    "",
     "backend_mode":           "local",
     "cloud_provider":         "",
     "cloud_base_url":         "",
@@ -43,7 +49,7 @@ DEFAULT_CFG = {
     "cli_models_enabled":     False,
     "cli_model":              "",
     "cli_reasoning_effort":   "",
-    "prompt_format":          "ChatML  (Qwen / Phi-3 / Yi)",
+    "prompt_format":          "Auto  (detect from model)",
     "gpu_acceleration":       "Auto",
     "working_language":       "Auto",
     "trigger_chars":          ".!?",
@@ -55,6 +61,11 @@ DEFAULT_CFG = {
     "writing_hotkey":         "f9",
     "rephrase_reading_mode":  "What's This About?",
     "rephrase_writing_mode":  "Polish My Writing",
+    "reflection_source":      "",
+    "reflection_journal_path": "",
+    "reflection_window_position": None,
+    "vocabulary_journal_path": "",
+    "vocabulary_window_position": None,
     "rephrase_creativity":    0.35,
     "idle_reset_sec":         30.0,
     "n_ctx":                  4096,
@@ -153,7 +164,10 @@ def apply_font_size(offset: int):
             if hasattr(mod, "FONT_SIZE_OFFSET"):
                 setattr(mod, "FONT_SIZE_OFFSET", FONT_SIZE_OFFSET)
 
+AUTO_FORMAT = "Auto  (detect from model)"
+
 FORMATS = [
+    AUTO_FORMAT,
     "ChatML  (Qwen / Phi-3 / Yi)",
     "Llama 3  (Meta)",
     "Mistral / Mixtral",
@@ -168,17 +182,45 @@ FORMATS = [
 
 GPU_OPTIONS = ["Auto", "Off", "Full"]
 
+# Auto, English and BHS stay pinned at the top as the common choices; the rest
+# are alphabetical so a longer list stays scannable. Every name here is
+# interpolated straight into the prompt, so it must read as the language's
+# ordinary English name. Names must also match vedium/language.py's detector,
+# which returns one of these for answer modes on Auto.
 WORKING_LANGUAGE_OPTIONS = [
     "Auto",
     "English",
     "BHS",
-    "German",
-    "Spanish",
+    "Czech",
+    "Danish",
+    "Dutch",
+    "Finnish",
     "French",
+    "German",
+    "Greek",
+    "Hungarian",
     "Italian",
+    "Norwegian",
+    "Polish",
+    "Portuguese",
+    "Romanian",
+    "Russian",
+    "Spanish",
+    "Swedish",
+    "Turkish",
+    "Ukrainian",
 ]
 
-_SLAVIC_LANGS = {"BHS"}
+# Working languages a user is assumed to be TYPING in rather than translating
+# into, so spell-check corrects the text instead of translating it. BHS is
+# unconditional because its users routinely type without diacritics, which the
+# language detector cannot reliably distinguish on one short sentence.
+# Any other named language qualifies dynamically — see language.is_same_language.
+#
+# Formerly _SLAVIC_LANGS, which described the members rather than the purpose
+# and implied that adding Polish or Czech would be correct; it would not, since
+# the old prompt behind it was hardcoded with BHS diacritics.
+_NATIVE_TYPING_LANGS = {"BHS"}
 
 def _is_header(mode: str) -> bool:
     return mode.startswith("──")
@@ -190,7 +232,8 @@ def _modes_with_headers(flat_modes: list[str]) -> list[str]:
     _GROUPS = [
         ("── Reading (answers) ──",
          {"What's This About?", "Define This", "Key Takeaways",
-          "Explain It", "Explain It (Simply)", "Explain with Quotes"}),
+          "Explain It", "Explain It (Simply)", "Explain with Quotes",
+          "Extract Writing Style"}),
         ("── Writing (replaces) ──",
          {"Polish My Writing", "More Casual", "More Formal (Academic)",
           "Diplomatically Worded", "More Concise", "More Detailed",
@@ -226,6 +269,7 @@ REPHRASE_MODES = [
     "Explain It",
     "Explain It (Simply)",
     "Explain with Quotes",
+    "Extract Writing Style",
     "Polish My Writing",
     "More Casual",
     "More Formal (Academic)",
@@ -257,6 +301,7 @@ ANSWER_MODES = frozenset({
     "Explain It",
     "Explain It (Simply)",
     "Explain with Quotes",
+    "Extract Writing Style",
 })
 
 def _is_answer_mode(mode: str) -> bool:
@@ -338,25 +383,22 @@ _REPHRASE_PROMPTS = {
         "Return ONLY the bullet list. No heading, no preamble, no extra lines."
     ),
     "Explain It": (
-        "The reader has selected this passage because they hit a wall — the language, concepts, or structure made them want to stop reading. "
-        "Your job is to re-express it so clearly and engagingly that they feel the idea land, understand why it matters, and want to keep going. "
-        "Preserve every argument, claim, and nuance — do not simplify the thinking, only the delivery. "
-        "If the author describes an impression, an appearance, or a view they question rather than endorse, keep that framing — never flatten it into a fact. "
-        "Replace jargon and abstract nouns with plain language; anchor unfamiliar concepts in concrete, real-world terms. "
-        "Briefly illuminate what the author is actually driving at — the underlying point or stakes — so the reader feels oriented, not just informed. "
-        "Treat the reader as intelligent: curious, capable, just momentarily lost. Never condescend. "
-        "Do not over-summarise or close the idea off — the goal is to send them back into the original text with confidence, not to replace it. "
-        "Return ONLY the rewritten text. No explanation. No extra lines."
+        "Act as a conservative reading-aid paraphraser. Restate the difficult passage in clear, modern language without interpreting, expanding, or commenting on it. "
+        "Follow the passage's order and logical structure. Preserve every explicit claim, list item, contrast, qualification, attribution, and evaluation. Do not omit or merge them. "
+        "Copy every distinct evaluative term from the source into the answer; never replace several evaluations with one umbrella word. If the source uses 'superfluous,' 'inappropriate,' and 'counterproductive,' the answer must retain all three. "
+        "Preserve scope and time distinctions such as 'previous or contemporary' rather than shortening them to 'existing.' "
+        "Use only information stated in the passage. Add no background, definitions, examples, reasons, descriptions, implications, stakes, or conclusions. "
+        "Keep vague or abstract wording equally general: never make it more specific. If the passage says only 'given the nature of X,' keep that phrase equally general; do not describe the nature of X or use it to invent a reason. "
+        "Keep incomplete reasoning incomplete. If the author gives a judgment without fully explaining it, attribute the judgment to the author and stop there. Preserve uncertainty exactly: 'seems' must remain 'seems'. "
+        "Write one natural paragraph of one to three concise sentences, no longer than the passage. Do not quote, cite, label, use bullets, or mention the passage or these instructions. Return ONLY the paraphrase."
     ),
     "Explain It (Simply)": (
-        "The reader needs this passage explained in plain, everyday language — no jargon, no technical terms, no assumed background knowledge. "
-        "Explain what the author is saying the way you would tell a curious friend who has never met this subject before. "
-        "Keep it SHORT: clearly shorter than the original passage. Cover each main idea in one or two plain sentences — do not pad, repeat, or wander. "
-        "Use at most ONE everyday analogy, and only if it genuinely makes the hardest idea click. "
-        "Stay strictly faithful to the author's position: if the author describes an impression, an appearance, or a view they question rather than endorse, say so explicitly ('it can seem that…') — never state it as fact. "
-        "Do not add examples, names, or claims that are not in the passage. "
-        "Use short sentences. Prefer simple words. Never talk down to the reader. "
-        "Return ONLY the explanation. No preamble, no extra lines."
+        "Rewrite the passage in plain, everyday language. Preserve who says what, the order of the ideas, every contrast, qualification, list item, and distinct judgment. "
+        "Never reverse what is usual and what is unusual, what the author accepts and rejects, or what is certain and what only seems true. "
+        "Do not add reasons, background, definitions, examples, analogies, implications, or conclusions. If the source leaves something unexplained or vague, leave it unexplained or vague. "
+        "Keep every separate judgment separate rather than replacing several judgments with one broad word. "
+        "Write one or two short sentences, clearly shorter than the source. Prefer simple words, but keep an abstract term if simplifying it would invent meaning. "
+        "Return ONLY the explanation. No preamble, labels, bullets, or extra lines."
     ),
     "Explain with Quotes": (
         "The reader wants a dependable explanation grounded only in the selected passage. "
@@ -368,6 +410,20 @@ _REPHRASE_PROMPTS = {
         "Do not add facts, motives, context, or interpretations not supported by the passage. "
         "If the passage does not establish something, say so rather than guessing. "
         "Keep the answer compact, use the same language as the passage, and return ONLY this card."
+    ),
+    "Extract Writing Style": (
+        "The user selected a representative writing sample and wants to turn its style into reusable "
+        "writing instructions. Analyse HOW the passage is written, not what it is about. "
+        "Infer only characteristics supported by the sample: voice and register, sentence length and "
+        "rhythm, diction, paragraph structure, rhetorical habits, imagery, punctuation, and notable "
+        "tendencies to use or avoid. Do not reproduce phrases from the sample and do not identify or "
+        "guess the author, book, genre, or subject. "
+        "Create a short descriptive name of two to five words that describes the writing mechanics, "
+        "not the topic. "
+        "Return EXACTLY this format:\n"
+        "STYLE NAME: <name>\n"
+        "STYLE PROFILE:\n"
+        "<a compact, concrete set of reusable writing guidelines>"
     ),
     "More Formal (Academic)": (
         "Rewrite the following text in a formal academic style. "

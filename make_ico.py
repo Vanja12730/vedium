@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """
 make_ico.py — Vedium Icon Generator (Midnight Blue & Champagne Gold)
 ──────────────────────────────────────────────────────────────────────────────

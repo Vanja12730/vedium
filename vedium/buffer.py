@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import time
 import threading
 from .constants import _is_mid_token, _word_count

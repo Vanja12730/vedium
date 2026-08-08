@@ -1,15 +1,32 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import sys
 import re
 import difflib
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import threading
 
+from . import diagnostics
 from . import constants as c
 from .constants import BG, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2, WARN, ERR, SUCCESS, FONT_B, FONT_SIZE_OFFSET, SCHEMES, _rephrase_history
-from .constants import DEFAULT_CFG
+from .config import (
+    _add_generated_style_mode,
+    _merge_custom_modes,
+    _parse_generated_style,
+    resolve_prompt_format,
+    save_cfg,
+)
 from .llm import _stream_cancel, chat_with_text_stream, _streaming_answer, _clean_llm_output
 from .cli_models import CLIModelError
+from .reflections import (
+    append_reflection,
+    append_vocabulary_entry,
+    is_term_sized,
+    reflection_journal_path,
+    vocabulary_journal_path,
+)
 
 # _UI_ROOT is read via the module (ui_thread._UI_ROOT) because it is rebound
 # when the UI thread starts — a from-import here would freeze the None it held
@@ -56,6 +73,408 @@ def _apply_windows_decorations(win):
     except Exception as e:
         print(f"[Vedium] Win32 decorations failed: {e}", file=sys.stderr)
 
+
+def _window_position_visible(win, x: int, y: int, width: int, height: int) -> bool:
+    """True when the saved title bar still intersects a monitor."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            import ctypes.wintypes as wt
+
+            title_bar = wt.RECT(x, y, x + min(width, 160), y + min(height, 48))
+            ctypes.windll.user32.MonitorFromRect.restype = ctypes.c_void_p
+            return bool(ctypes.windll.user32.MonitorFromRect(ctypes.byref(title_bar), 0))
+        except Exception:
+            pass
+    screen_width = win.winfo_screenwidth()
+    screen_height = win.winfo_screenheight()
+    return x < screen_width and x + width > 0 and y < screen_height and y + 48 > 0
+
+
+def _geometry_offset(value: int) -> str:
+    return f"+{value}" if value >= 0 else str(value)
+
+
+def _restore_window_position(win, cfg: dict | None, key: str, width: int, height: int):
+    """Size `win` and place it where the user last left it.
+
+    Falls back to centred when nothing is stored, when the stored value is
+    unusable, or when the monitor it was on is no longer attached — otherwise
+    unplugging a second screen would strand the dialog off-screen.
+    """
+    saved = (cfg or {}).get(key) or {}
+    try:
+        x = int(saved["x"])
+        y = int(saved["y"])
+    except (KeyError, TypeError, ValueError):
+        x = y = None
+    if x is None or not _window_position_visible(win, x, y, width, height):
+        x = (win.winfo_screenwidth() - width) // 2
+        y = (win.winfo_screenheight() - height) // 2
+    win.geometry(f"{width}x{height}{_geometry_offset(x)}{_geometry_offset(y)}")
+
+
+def _remember_window_position(win, cfg: dict | None, key: str):
+    """Persist where the user left `win` so it reopens in the same place."""
+    if cfg is None:
+        return
+    try:
+        position = {"x": win.winfo_x(), "y": win.winfo_y()}
+    except tk.TclError:
+        return   # window already gone; nothing worth recording
+    cfg[key] = position
+    save_cfg(cfg)
+
+
+def _save_generated_style(cfg: dict, generated_text: str, parent) -> bool:
+    """Save the editable style-card contents as a named custom writing mode."""
+    suggested_name, profile = _parse_generated_style(generated_text)
+    name = simpledialog.askstring(
+        "Save writing style",
+        "Style name:",
+        initialvalue=suggested_name,
+        parent=parent,
+    )
+    if name is None:
+        return False
+    previous_custom = dict(cfg.get("custom_rephrase_modes", {}))
+    previous_mode = cfg.get("rephrase_writing_mode", "Polish My Writing")
+    try:
+        _add_generated_style_mode(cfg, name, profile)
+    except ValueError as exc:
+        messagebox.showerror("Writing style not saved", str(exc), parent=parent)
+        return False
+    if not save_cfg(cfg):
+        cfg["custom_rephrase_modes"] = previous_custom
+        cfg["rephrase_writing_mode"] = previous_mode
+        _merge_custom_modes(cfg)
+        return False
+    name = name.strip()
+    diagnostics.record("config", "info", f'Writing style saved and selected: "{name}".')
+    from .ui_settings import _refresh_open_rephrase_modes
+    _refresh_open_rephrase_modes()
+    parent.after(100, lambda: _info_toast(f'Writing style "{name}" saved and selected.'))
+    return True
+
+
+def _open_reflection_dialog(parent, cfg: dict | None, passage: str, mode: str) -> bool:
+    """Collect and locally save a reflection about the selected passage."""
+    win = tk.Toplevel(parent)
+    win.title("Add reflection")
+    win.transient(parent)
+    win.attributes("-topmost", True)
+    win.configure(bg=SURFACE)
+    win.resizable(True, True)
+    _restore_window_position(win, cfg, "reflection_window_position", 540, 500)
+    win.minsize(500, 460)
+    _apply_windows_decorations(win)
+
+    action_bar = tk.Frame(win, bg=SURFACE, padx=14, pady=10)
+    action_bar.pack(side="bottom", fill="x")
+    tk.Frame(action_bar, bg=SURF2, height=1).pack(fill="x", pady=(0, 10))
+    btn_row = tk.Frame(action_bar, bg=SURFACE)
+    btn_row.pack(fill="x")
+
+    body = tk.Frame(win, bg=SURFACE, padx=14, pady=12)
+    body.pack(fill="both", expand=True)
+
+    journal_path = [reflection_journal_path(
+        configured_path=(cfg or {}).get("reflection_journal_path", ""),
+    )]
+
+    def choose_journal():
+        chosen = filedialog.asksaveasfilename(
+            parent=win,
+            title="Choose reflection journal",
+            defaultextension=".md",
+            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+            initialdir=str(journal_path[0].parent),
+            initialfile=journal_path[0].name,
+            # Picking an existing journal is the normal case — entries are
+            # appended to it, never overwritten — so the "replace this file?"
+            # warning would be actively misleading here.
+            confirmoverwrite=False,
+        )
+        if not chosen:
+            return
+        chosen_path = reflection_journal_path(configured_path=chosen)
+        if cfg is not None:
+            previous = cfg.get("reflection_journal_path", "")
+            cfg["reflection_journal_path"] = str(chosen_path)
+            if not save_cfg(cfg):
+                cfg["reflection_journal_path"] = previous
+                return
+        journal_path[0] = chosen_path
+        path_label.config(text=f"Saved locally to {chosen_path}")
+
+    tk.Label(
+        body, text="Add your reflection", font=("Segoe UI", 10 + FONT_SIZE_OFFSET, "bold"),
+        bg=SURFACE, fg=ACCENT2,
+    ).pack(anchor="w")
+    location_row = tk.Frame(body, bg=SURFACE)
+    location_row.pack(fill="x", pady=(2, 10))
+    path_label = tk.Label(
+        location_row, text=f"Saved locally to {journal_path[0]}", font=FONT_B,
+        bg=SURFACE, fg=MUTED, justify="left", anchor="w", wraplength=405,
+    )
+    path_label.pack(side="left", fill="x", expand=True)
+    tk.Button(
+        location_row, text="Change…", font=FONT_B, bg=SURF2, fg=TEXT,
+        relief="flat", padx=8, pady=2, cursor="hand2", command=choose_journal,
+    ).pack(side="right", padx=(8, 0))
+
+    tk.Label(body, text="Selected passage", font=FONT_B, bg=SURFACE, fg=TEXT).pack(anchor="w")
+    preview = tk.Text(
+        body, height=5, font=FONT_B, bg=BG, fg=MUTED, relief="flat",
+        wrap="word", padx=8, pady=6,
+    )
+    preview.pack(fill="x", pady=(3, 9))
+    preview.insert("1.0", passage)
+    preview.config(state="disabled")
+
+    tk.Label(body, text="Source / book (optional)", font=FONT_B, bg=SURFACE, fg=TEXT).pack(anchor="w")
+    source_var = tk.StringVar(
+        master=win, value=(cfg or {}).get("reflection_source", ""),
+    )
+    source_entry = tk.Entry(
+        body, textvariable=source_var, font=FONT_B, bg=BG, fg=TEXT,
+        insertbackground=ACCENT2, relief="flat",
+    )
+    source_entry.pack(fill="x", ipady=4, pady=(3, 9))
+
+    tk.Label(body, text="Your reflection", font=FONT_B, bg=SURFACE, fg=TEXT).pack(anchor="w")
+    reflection_txt = tk.Text(
+        body, height=7, font=("Segoe UI", 10 + FONT_SIZE_OFFSET), bg=BG, fg=TEXT,
+        insertbackground=ACCENT2, relief="flat", wrap="word", padx=8, pady=6,
+    )
+    reflection_txt.pack(fill="both", expand=True, pady=(3, 10))
+
+    result = [False]
+    closed = [False]
+
+    def close():
+        if closed[0]:
+            return
+        closed[0] = True
+        _remember_window_position(win, cfg, "reflection_window_position")
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        win.destroy()
+
+    def save(event=None):
+        reflection = reflection_txt.get("1.0", "end-1c").strip()
+        if not reflection:
+            messagebox.showwarning(
+                "Reflection not saved", "Write a reflection before saving.", parent=win,
+            )
+            reflection_txt.focus_set()
+            return "break"
+        source = source_var.get().strip()
+        try:
+            journal = append_reflection(
+                passage, reflection, source=source, mode=mode, path=journal_path[0],
+            )
+        except (OSError, ValueError) as exc:
+            diagnostics.record("reflection", "error", "Reflection not saved.", str(exc))
+            messagebox.showerror("Reflection not saved", str(exc), parent=win)
+            return "break"
+
+        if cfg is not None:
+            cfg["reflection_source"] = source
+            save_cfg(cfg)
+        diagnostics.record("reflection", "info", f"Reflection saved locally: {journal}")
+        result[0] = True
+        close()
+        _info_toast("Reflection saved to your Vedium journal.")
+        return "break"
+
+    tk.Label(
+        btn_row, text="Ctrl+Enter to save", font=FONT_B, bg=SURFACE, fg=MUTED,
+    ).pack(side="left")
+    tk.Button(
+        btn_row, text="Save reflection  ✓",
+        font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"),
+        bg=ACCENT, fg="white", relief="flat", padx=14, pady=6,
+        cursor="hand2", command=save,
+    ).pack(side="right")
+    tk.Button(
+        btn_row, text="Cancel", font=FONT_B, bg=SURF2, fg=TEXT,
+        relief="flat", padx=12, pady=6, cursor="hand2", command=close,
+    ).pack(side="right", padx=(0, 8))
+
+    win.protocol("WM_DELETE_WINDOW", close)
+    win.bind("<Control-Return>", save)
+    win.bind("<Escape>", lambda _event: close())
+    win.grab_set()
+    reflection_txt.focus_set()
+    parent.wait_window(win)
+    return result[0]
+
+
+def _open_vocabulary_dialog(
+    parent, cfg: dict | None, term: str, definition: str,
+) -> bool:
+    """Review and locally save a word or phrase with its current definition."""
+    win = tk.Toplevel(parent)
+    win.title("Save to vocabulary")
+    win.transient(parent)
+    win.attributes("-topmost", True)
+    win.configure(bg=SURFACE)
+    win.resizable(True, True)
+    _restore_window_position(win, cfg, "vocabulary_window_position", 540, 480)
+    win.minsize(500, 440)
+    _apply_windows_decorations(win)
+
+    action_bar = tk.Frame(win, bg=SURFACE, padx=14, pady=10)
+    action_bar.pack(side="bottom", fill="x")
+    tk.Frame(action_bar, bg=SURF2, height=1).pack(fill="x", pady=(0, 10))
+    btn_row = tk.Frame(action_bar, bg=SURFACE)
+    btn_row.pack(fill="x")
+
+    body = tk.Frame(win, bg=SURFACE, padx=14, pady=12)
+    body.pack(fill="both", expand=True)
+
+    journal_path = [vocabulary_journal_path(
+        configured_path=(cfg or {}).get("vocabulary_journal_path", ""),
+        reflection_path=(cfg or {}).get("reflection_journal_path", ""),
+    )]
+
+    def choose_journal():
+        chosen = filedialog.asksaveasfilename(
+            parent=win,
+            title="Choose vocabulary journal",
+            defaultextension=".md",
+            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+            initialdir=str(journal_path[0].parent),
+            initialfile=journal_path[0].name,
+            confirmoverwrite=False,   # entries are appended, not overwritten
+        )
+        if not chosen:
+            return
+        chosen_path = vocabulary_journal_path(configured_path=chosen)
+        if cfg is not None:
+            previous = cfg.get("vocabulary_journal_path", "")
+            cfg["vocabulary_journal_path"] = str(chosen_path)
+            if not save_cfg(cfg):
+                cfg["vocabulary_journal_path"] = previous
+                return
+        journal_path[0] = chosen_path
+        path_label.config(text=f"Saved locally to {chosen_path}")
+
+    tk.Label(
+        body, text="Save to vocabulary",
+        font=("Segoe UI", 10 + FONT_SIZE_OFFSET, "bold"),
+        bg=SURFACE, fg=ACCENT2,
+    ).pack(anchor="w")
+    location_row = tk.Frame(body, bg=SURFACE)
+    location_row.pack(fill="x", pady=(2, 10))
+    path_label = tk.Label(
+        location_row, text=f"Saved locally to {journal_path[0]}", font=FONT_B,
+        bg=SURFACE, fg=MUTED, justify="left", anchor="w", wraplength=405,
+    )
+    path_label.pack(side="left", fill="x", expand=True)
+    tk.Button(
+        location_row, text="Change…", font=FONT_B, bg=SURF2, fg=TEXT,
+        relief="flat", padx=8, pady=2, cursor="hand2", command=choose_journal,
+    ).pack(side="right", padx=(8, 0))
+
+    # Define This runs on the selection, which may be a whole passage. Only
+    # prefill when that selection could pass for a term — a truncated fragment
+    # would look like a real heading while being the wrong one.
+    prefill = " ".join((term or "").split()) if is_term_sized(term) else ""
+    tk.Label(
+        body,
+        text="Word or phrase" if prefill else
+             "Word or phrase  (the selection is too long to use — type it)",
+        font=FONT_B, bg=SURFACE, fg=TEXT if prefill else WARN,
+    ).pack(anchor="w")
+    term_var = tk.StringVar(master=win, value=prefill)
+    term_entry = tk.Entry(
+        body, textvariable=term_var, font=("Segoe UI", 10 + FONT_SIZE_OFFSET),
+        bg=BG, fg=TEXT, insertbackground=ACCENT2, relief="flat",
+    )
+    term_entry.pack(fill="x", ipady=4, pady=(3, 9))
+
+    tk.Label(body, text="Source / book (optional)", font=FONT_B, bg=SURFACE, fg=TEXT).pack(anchor="w")
+    source_var = tk.StringVar(
+        master=win, value=(cfg or {}).get("reflection_source", ""),
+    )
+    source_entry = tk.Entry(
+        body, textvariable=source_var, font=FONT_B, bg=BG, fg=TEXT,
+        insertbackground=ACCENT2, relief="flat",
+    )
+    source_entry.pack(fill="x", ipady=4, pady=(3, 9))
+
+    tk.Label(body, text="Definition", font=FONT_B, bg=SURFACE, fg=TEXT).pack(anchor="w")
+    definition_txt = tk.Text(
+        body, height=9, font=("Segoe UI", 10 + FONT_SIZE_OFFSET), bg=BG, fg=TEXT,
+        insertbackground=ACCENT2, relief="flat", wrap="word", padx=8, pady=6,
+    )
+    definition_txt.pack(fill="both", expand=True, pady=(3, 8))
+    definition_txt.insert("1.0", definition)
+
+    result = [False]
+    closed = [False]
+
+    def close():
+        if closed[0]:
+            return
+        closed[0] = True
+        _remember_window_position(win, cfg, "vocabulary_window_position")
+        try:
+            win.grab_release()
+        except tk.TclError:
+            pass
+        win.destroy()
+
+    def save(event=None):
+        saved_term = term_var.get().strip()
+        saved_definition = definition_txt.get("1.0", "end-1c").strip()
+        source = source_var.get().strip()
+        try:
+            journal = append_vocabulary_entry(
+                saved_term, saved_definition, source=source, path=journal_path[0],
+            )
+        except (OSError, ValueError) as exc:
+            diagnostics.record("vocabulary", "error", "Vocabulary entry not saved.", str(exc))
+            messagebox.showerror("Vocabulary entry not saved", str(exc), parent=win)
+            return "break"
+
+        if cfg is not None:
+            cfg["reflection_source"] = source
+            save_cfg(cfg)
+        diagnostics.record("vocabulary", "info", f"Vocabulary entry saved locally: {journal}")
+        result[0] = True
+        close()
+        _info_toast("Saved to your Vedium vocabulary.")
+        return "break"
+
+    tk.Label(
+        btn_row, text="Ctrl+Enter to save", font=FONT_B, bg=SURFACE, fg=MUTED,
+    ).pack(side="left")
+    tk.Button(
+        btn_row, text="Save to vocabulary  ✓",
+        font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"),
+        bg=ACCENT, fg="white", relief="flat", padx=14, pady=6,
+        cursor="hand2", command=save,
+    ).pack(side="right")
+    tk.Button(
+        btn_row, text="Cancel", font=FONT_B, bg=SURF2, fg=TEXT,
+        relief="flat", padx=12, pady=6, cursor="hand2", command=close,
+    ).pack(side="right", padx=(0, 8))
+
+    win.protocol("WM_DELETE_WINDOW", close)
+    win.bind("<Control-Return>", save)
+    win.bind("<Escape>", lambda _event: close())
+    win.grab_set()
+    term_entry.focus_set()
+    term_entry.selection_range(0, "end")
+    parent.wait_window(win)
+    return result[0]
+
+
 class _Toast:
     """Compact suggestion popup for automatic spell/grammar fixes."""
     def __init__(self, original: str, corrected: str, on_accept, on_ignore,
@@ -65,7 +484,7 @@ class _Toast:
         self._on_accept       = on_accept
         self._on_ignore       = on_ignore
         self._label           = label
-        self._fmt             = fmt or DEFAULT_CFG["prompt_format"]
+        self._fmt             = fmt or resolve_prompt_format(cfg or {})
         self._cfg             = cfg
         self._notice_label    = None
         self._notice_before   = None
@@ -422,20 +841,23 @@ class _EditableToast:
     """
     def __init__(self, corrected: str, on_accept, on_ignore, label: str = "Writing suggestion",
                  original: str = "", fmt: str = "", answer_only: bool = False,
-                 cfg: dict | None = None):
+                 cfg: dict | None = None, on_save_style=None):
         self._corrected   = corrected
         self._original    = original
         self._on_accept   = on_accept
         self._on_ignore   = on_ignore
         self._label       = label
         self._answer_only = answer_only
-        self._fmt       = fmt or DEFAULT_CFG["prompt_format"]
+        self._on_save_style = on_save_style
+        self._fmt       = fmt or resolve_prompt_format(cfg or {})
         self._cfg       = cfg
         self._close_fn   = None   # populated by _show(); enables external dismissal
         self._txt        = None   # populated by _show(); enables streaming updates
         self._notice_label = None
         self._notice_before = None
         self._replace_btn = None  # populated by _show(); disabled until streaming ends
+        self._save_style_btn = None  # populated only for Extract Writing Style
+        self._save_vocabulary_btn = None  # populated only for Define This
         self._stop_btn    = None  # populated by _show(); enabled only while streaming
         _ui_call(self._show, wait=True)   # wait=True ensures _close_fn is set before __init__ returns
 
@@ -480,6 +902,12 @@ class _EditableToast:
                     self._txt.tag_add("sel", "1.0", "end-1c")
                 if self._replace_btn is not None:
                     self._replace_btn.config(state="normal")
+                if self._save_style_btn is not None:
+                    self._save_style_btn.config(state="normal")
+                if self._save_vocabulary_btn is not None:
+                    self._save_vocabulary_btn.config(
+                        state="normal" if text.strip() else "disabled",
+                    )
                 if self._stop_btn is not None:
                     self._stop_btn.config(state="disabled", text="■ Stop", fg="white")
             else:
@@ -489,6 +917,8 @@ class _EditableToast:
                 self._txt.tag_remove("sel", "1.0", "end")
                 if self._stop_btn is not None:
                     self._stop_btn.config(state="normal", text="■ Stop", fg="white")
+                if self._save_vocabulary_btn is not None:
+                    self._save_vocabulary_btn.config(state="disabled")
             self._txt.see("end")
 
         _ui_call(_set, wait=False)
@@ -526,9 +956,13 @@ class _EditableToast:
         icon = "💡" if self._answer_only else "✏"
         tk.Label(body, text=f"{icon}  {self._label}",
                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"), bg=SURFACE, fg=ACCENT2).pack(anchor="w")
-        hint = ("Read the answer below — copy it or ask a follow-up."
-                if self._answer_only else
-                "Edit the suggestion below, then choose Replace or Ignore.")
+        hint = (
+            "Review the generated name and profile, then save or edit them."
+            if self._on_save_style else
+            "Read the answer below — copy it or ask a follow-up."
+            if self._answer_only else
+            "Edit the suggestion below, then choose Replace or Ignore."
+        )
         tk.Label(body, text=hint,
                  font=FONT_B, bg=SURFACE, fg=MUTED).pack(anchor="w", pady=(2, 8))
 
@@ -551,6 +985,7 @@ class _EditableToast:
         btn_row.pack(anchor="w", pady=(10, 0))
 
         closed = {"value": False}
+        child_dialog_open = [False]
 
         def accept():
             # Answer cards have no Replace: accepting would paste the answer
@@ -643,17 +1078,97 @@ class _EditableToast:
             copy_btn.config(text="Copied ✓")
             root.after(1500, lambda: copy_btn.config(text="Copy"))
 
+        def _do_save_style():
+            if self._txt is None or self._save_style_btn is None:
+                return
+            if str(self._save_style_btn.cget("state")) != "normal":
+                return
+            if self._on_save_style(self._txt.get("1.0", "end-1c"), root):
+                ignore()
+
+        save_style_btn = None
+        if self._on_save_style:
+            save_style_btn = tk.Button(
+                btn_row, text="Save as Writing Style…",
+                font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"),
+                bg=ACCENT, fg="white", relief="flat", padx=10, pady=3,
+                cursor="hand2", state="disabled", command=_do_save_style,
+            )
+        self._save_style_btn = save_style_btn
+
         # On an answer card Copy is the primary (accent-coloured, first) action;
         # on a rewrite toast it stays secondary after Replace and Stop.
+        copy_is_primary = (
+            self._answer_only and not self._on_save_style
+            and self._label != "Define This"
+        )
         copy_btn = tk.Button(btn_row, text="Copy",
-                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold") if self._answer_only else FONT_B,
-                  bg=ACCENT if self._answer_only else SURF2,
-                  fg="white" if self._answer_only else TEXT,
+                  font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold") if copy_is_primary else FONT_B,
+                  bg=ACCENT if copy_is_primary else SURF2,
+                  fg="white" if copy_is_primary else TEXT,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=_do_copy)
 
+        def _do_reflect():
+            child_dialog_open[0] = True
+            _on_et_enter()
+            try:
+                saved = _open_reflection_dialog(
+                    root, self._cfg, self._original, self._label,
+                )
+            finally:
+                child_dialog_open[0] = False
+            if saved:
+                reflect_btn.config(text="Reflection saved  ✓")
+                root.after(1800, lambda: reflect_btn.config(text="Reflect…"))
+
+        reflect_btn = None
+        if self._answer_only and not self._on_save_style and self._original.strip():
+            reflect_btn = tk.Button(
+                btn_row, text="Reflect…", font=FONT_B, bg=SURF2, fg=TEXT,
+                relief="flat", padx=10, pady=3, cursor="hand2", command=_do_reflect,
+            )
+
+        def _do_save_vocabulary():
+            if self._txt is None or self._save_vocabulary_btn is None:
+                return
+            if str(self._save_vocabulary_btn.cget("state")) != "normal":
+                return
+            definition = self._txt.get("1.0", "end-1c")
+            child_dialog_open[0] = True
+            _on_et_enter()
+            try:
+                saved = _open_vocabulary_dialog(
+                    root, self._cfg, self._original, definition,
+                )
+            finally:
+                child_dialog_open[0] = False
+            if saved:
+                self._save_vocabulary_btn.config(text="Saved to Vocabulary  ✓")
+                root.after(1800, lambda: self._save_vocabulary_btn.config(
+                    text="Save to Vocabulary…",
+                ))
+
+        save_vocabulary_btn = None
+        if self._answer_only and self._label == "Define This" and self._original.strip():
+            save_vocabulary_btn = tk.Button(
+                btn_row, text="Save to Vocabulary…",
+                font=("Segoe UI", 9 + FONT_SIZE_OFFSET, "bold"),
+                bg=ACCENT, fg="white", relief="flat", padx=10, pady=3,
+                cursor="hand2", state="disabled", command=_do_save_vocabulary,
+            )
+        self._save_vocabulary_btn = save_vocabulary_btn
+
         if self._answer_only:
-            copy_btn.pack(side="left")
+            if save_style_btn is not None:
+                save_style_btn.pack(side="left")
+                copy_btn.pack(side="left", padx=(8, 0))
+            else:
+                copy_btn.pack(side="left")
+                if reflect_btn is not None:
+                    reflect_btn.pack(side="left", padx=(8, 0))
+                if save_vocabulary_btn is not None:
+                    save_vocabulary_btn.pack(side="left", padx=(8, 0))
             stop_btn.pack(side="left", padx=(8, 0))
         else:
             replace_btn.pack(side="left")
@@ -764,6 +1279,8 @@ class _EditableToast:
                 def _lock_ui():
                     if self._replace_btn is not None:
                         self._replace_btn.config(state="disabled")
+                    if self._save_vocabulary_btn is not None:
+                        self._save_vocabulary_btn.config(state="disabled")
                     if self._stop_btn is not None:
                         self._stop_btn.config(state="normal", text="■ Stop", fg="white")
                     if self._txt is not None:
@@ -817,6 +1334,10 @@ class _EditableToast:
                             self._txt.see("end")
                         if self._replace_btn is not None:
                             self._replace_btn.config(state="normal")
+                        if self._save_vocabulary_btn is not None:
+                            self._save_vocabulary_btn.config(
+                                state="normal" if r.strip() else "disabled",
+                            )
                         if self._stop_btn is not None:
                             self._stop_btn.config(state="disabled", text="■ Stop", fg="white")
                         _et_refresh_nav()
@@ -836,6 +1357,10 @@ class _EditableToast:
                             self._txt.config(fg=ERR)
                         if self._replace_btn is not None:
                             self._replace_btn.config(state="normal")
+                        if self._save_vocabulary_btn is not None:
+                            self._save_vocabulary_btn.config(
+                                state="normal" if base.strip() else "disabled",
+                            )
                         if self._stop_btn is not None:
                             self._stop_btn.config(state="disabled", text="■ Stop", fg="white")
                         chat_entry.config(state="normal")
@@ -881,7 +1406,7 @@ class _EditableToast:
                     pass
 
         def _on_et_leave(event=None):
-            if closed["value"] or _et_auto_close_id[0] is not None:
+            if child_dialog_open[0] or closed["value"] or _et_auto_close_id[0] is not None:
                 return
             w = root.winfo_containing(event.x_root, event.y_root)
             if w is None or not str(w).startswith(str(root)):

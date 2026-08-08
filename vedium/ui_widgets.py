@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Reusable Tk widgets shared by the Settings window tabs.
 
 Colour and font names are from-imported; constants.apply_scheme() and

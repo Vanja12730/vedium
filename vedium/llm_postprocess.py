@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Model-output post-processing.
 
 Reasoning / chain-of-thought stripping (think-tags and Harmony channels),
@@ -49,16 +52,18 @@ _THOUGHT_END_RE = re.compile(r"<\s*\|?\s*thought[_\-\s]*end\s*\|?\s*>", re.IGNOR
 # The matching opener, used by the streaming filter to know reasoning has begun.
 _THOUGHT_OPEN_RE = re.compile(r"<\s*\|?\s*(?:thought[_\-\s]*(?:start|begin)?|channel)\s*\|?\s*>", re.IGNORECASE)
 
-# Detokenised Harmony leak (gpt-oss run through the in-process llama-cpp path,
-# e.g. with the wrong prompt format selected): llama-cpp renders special tokens
-# (<|channel|>, <|message|>, <|start|>, <|end|>) as empty strings, so the raw
-# output has NO <|...|> markers at all — the channel names survive as bare
-# lowercase words glued straight onto the surrounding text:
+# Detokenised Harmony leak: this shape appears when the harmony markers are
+# tokenised as CONTROL tokens, which llama-cpp detokenises to empty strings —
+# leaving raw output with NO <|...|> markers at all, the channel names surviving
+# as bare lowercase words glued straight onto the surrounding text:
 #     "analysisWe need to fix…assistantfinalCorrected text."
 # The answer follows the glued "assistantfinal" marker; a leading bare CoT
 # channel name with no such marker means the answer never made it out.
 # Both patterns are deliberately strict (case-sensitive, glued to the next
 # character) so ordinary prose starting with "Analysis …" is never touched.
+# Whether this shape occurs is per-GGUF, not universal: gpt-oss-20b-MXFP4 types
+# these as user-defined tokens, so they detokenise to literal text and take the
+# marker-based path below instead. Kept for builds that do type them as control.
 _PLAIN_FINAL_MARK   = "assistantfinal"
 _PLAIN_COT_OPEN_RE  = re.compile(r"^\s*(?:analysis|commentary)\S")
 
@@ -306,6 +311,14 @@ def _get_thinking_budget(cfg: dict | None = None) -> int:
         manual = int(cfg.get("thinking_budget", 0))
         if manual > 0:
             return manual
+    # Current llama-server applies enable_thinking=false through the model's
+    # native chat template. Reserving thousands of hidden-reasoning tokens in
+    # that case only crowds the visible answer out of small context windows.
+    if (
+        _backend.server_disable_thinking
+        and getattr(_backend.client, "supports_chat_template_kwargs", False)
+    ):
+        return 0
     return _THINKING_BUDGET_AUTO if _backend.reasoning_detected else 0
 
 
@@ -378,8 +391,12 @@ _BHS_DIACRITIC_WORDS = {
     "svasta": "svašta", "vise": "više", "jos": "još", "vec": "već",
     "covek": "čovek", "covjek": "čovjek", "zena": "žena", "zene": "žene",
     "muz": "muž", "noc": "noć", "noci": "noći", "moc": "moć",
-    "pomoc": "pomoć", "caj": "čaj", "cesto": "često", "veceras": "večeras",
-    "vecera": "večera",
+    "pomoc": "pomoć", "caj": "čaj", "cesto": "često", "cesce": "češće",
+    # Gemma has emitted this plausible-looking but wrong split for "cesce";
+    # normalise it just like a still-unaccented form.
+    "ćešce": "češće", "češce": "češće",
+    "najcesce": "najčešće", "najćešce": "najčešće", "najčešce": "najčešće",
+    "veceras": "večeras", "vecera": "večera",
 }
 
 _BHS_WORD_RE = re.compile(
@@ -494,11 +511,29 @@ def _strip_echo_prefix(original: str, corrected: str) -> str:
     return corrected
 
 
+def _strip_wrapping_quotes(text: str) -> str:
+    """Remove quotes the model wrapped around its whole answer.
+
+    Only a MATCHED pair whose quote character appears nowhere inside is
+    removed.  A blanket strip() of the quote characters also ate the opening
+    quote of an answer that merely starts with a quotation — a real Define This
+    result, '"Liminal" describes something at a boundary.', was being stored as
+    'Liminal" describes …' — and would mangle alternating speech such as
+    '"Hello," he said, "goodbye."' the same way.
+    """
+    while len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        inner = text[1:-1]
+        if text[0] in inner:
+            break            # the quotes belong to the content, not around it
+        text = inner
+    return text
+
+
 def _clean_llm_output(text: str) -> str:
     """Normalize harmless formatting problems in model output."""
     text = text.strip()
     text = _strip_reasoning(text).strip()
-    text = text.strip("\"'")
+    text = _strip_wrapping_quotes(text)
     # Add missing spaces after punctuation without disturbing decimals like 3.14.
     text = re.sub(r"([,;:])(?=\S)", r"\1 ", text)
     text = re.sub(r"([.!?])(?=[A-Za-zÀ-ž0-9])", r"\1 ", text)

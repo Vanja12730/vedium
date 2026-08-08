@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """High-level LLM features: spell check, rephrase, and chat.
 
 The heavy lifting lives in three sibling modules -- llm_state (the active
@@ -12,8 +15,9 @@ import time
 import json
 import threading
 
-from vedium.constants import _SLAVIC_LANGS, _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
+from vedium.constants import _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
 from vedium.config import load_cfg
+from vedium.language import detect_language, is_same_language
 from vedium.prompt_builder import _build_prompt, _build_chat_prompt
 from vedium import diagnostics
 from vedium.cli_models import CLIClient, CLIModelError, provenance_footer
@@ -25,7 +29,6 @@ from vedium import llm_postprocess
 
 from vedium.llm_state import _ActiveBackend, _backend, _stream_cancel
 from vedium.llm_backends import (
-    _make_llama,
     _LlamaServerClient,
     _CloudClient,
     _prompt_to_messages,
@@ -38,7 +41,6 @@ from vedium.llm_backends import (
     fetch_cloud_models,
     detect_local_server,
     load_model,
-    _detect_gpu_backend,
     _friendly_cloud_error,
     _is_cloud_quota_error,
     _is_cloud_server_error,
@@ -112,23 +114,117 @@ def _language_instruction(working_language: str) -> str:
     )
 
 
-def _answer_language_instruction(_working_language: str) -> str:
+def _answer_language_instruction(working_language: str) -> str:
     """
     Language directive for answer modes (What's This About?, Define This, …).
 
     Unlike _language_instruction, this controls the language of the ANSWER, not
     of a rewritten text — so it must not mention translating or correcting the
-    input. Reading modes always answer in the language of the selected text.
+    input.
+
+    Auto  → answer in whatever language the passage is in. This asks the model
+            to identify the language itself, which it can get wrong: on dense,
+            Latinate English (philosophy, academic prose) small models have been
+            observed answering in French, Spanish or German. A named language is
+            the reliable escape hatch, which is why it must be honoured here —
+            this argument was previously ignored, so the Working Language
+            setting silently did nothing for every reading mode.
+    Named → always answer in that language, whatever the passage is written in.
     """
+    lang = (working_language or "Auto").strip()
+    if lang == "Auto":
+        return (
+            "Write your complete answer in the same language as the text. "
+            "Do not translate the answer into another language. "
+        )
+    if lang == "BHS":
+        return (
+            "Write your complete answer in natural, fluent BHS "
+            "(Bosnian/Croatian/Serbian, ijekavica standard), regardless of what "
+            "language the text is written in. "
+        )
     return (
-        "Write your complete answer in the same language as the text. "
-        "Do not translate the answer into another language. "
+        f"Write your complete answer in natural, fluent {lang}, "
+        f"regardless of what language the text is written in. "
     )
 
 
 def _is_translation_mode(mode: str) -> bool:
     """Return True for explicit translation modes that manage their own output language."""
     return (mode or "").startswith("Translate ")
+
+
+# ── correction-first spell prompt ────────────────────────────────────────────
+# Used when the text is already in the working language (or the language is
+# unknown), so it must be CORRECTED rather than translated. The body is shared;
+# only the opening line and the optional BHS diacritic block vary, so a new
+# language needs no new prompt.
+_CORRECTION_RULES = (
+    "Your ONLY job is to fix clear errors: misspelled words, wrong capitalization, "
+    "missing or wrong punctuation, and broken spacing. "
+)
+_CORRECTION_PRESERVE = (
+    "IMPORTANT: Preserve all brand names, camelCase words, code variables, URLs, paths, and email addresses exactly as written. Do NOT change their casing or spelling. "
+    "Do NOT substitute any correctly spelled word with a synonym — even if you think "
+    "a different word sounds better, leave it exactly as written. "
+    "Do NOT restructure, rephrase, or reorder any part of the sentence. "
+    "Do NOT add words, remove words, or change sentence structure. "
+    "Make the smallest possible change to fix each error and leave everything else untouched. "
+)
+_CORRECTION_TAIL = (
+    "Preserve existing commas unless they are clearly wrong. "
+    "Ensure there is one space after sentence-ending punctuation before the next sentence. "
+    "Return ONLY the corrected text. No explanation. No extra lines. "
+    "If there are no errors, return the text exactly as given."
+)
+# BHS users routinely type without diacritics, so restoring them is part of
+# ordinary correction rather than an optional extra. The explicit allow-list and
+# the Latin-script line exist because small models otherwise invent accents
+# (ǒ, ù, â) or switch to Cyrillic mid-sentence.
+_BHS_DIACRITIC_RULES = (
+    "The input may be written without some or all diacritics "
+    "(e.g. 'c' instead of 'č'/'ć', 's' instead of 'š', 'z' instead of 'ž', 'd' instead of 'đ'). "
+    "Restore the correct BHS diacritics where they are missing. "
+    "IMPORTANT: The ONLY diacritical characters used in BHS are: š, č, ć, ž, đ "
+    "(and their uppercase forms Š, Č, Ć, Ž, Đ). "
+    "Do NOT introduce any other Unicode or accented characters (e.g. ǒ, ù, ó, à, â, etc.). "
+    "Output BHS in LATIN script only — never use Cyrillic letters. "
+    "Do NOT add diacritics to words that are already spelled correctly without them. "
+    "Common BHS words that need diacritics: 'cao'->'ćao', 'ces'->'ćeš', 'hoces'->'hoćeš', "
+    "'neces'->'nećeš', 'mozes'->'možeš', 'ides'->'ideš', 'jesi'->'jesi' (no change), "
+    "'sta'->'šta', 'sto'->'što', 'vise'->'više', 'nase'->'naše', 'vase'->'vaše', "
+    "'isao'->'išao', 'dosao'->'došao', 'nasao'->'našao', 'prosao'->'prošao', "
+    "'cesto'->'često', 'cesce'->'češće'. "
+)
+# On Auto the language is unknown, so BHS gets a hint rather than the full block:
+# undiacriticised BHS is otherwise indistinguishable from a stream of typos.
+_AUTO_BHS_HINT = (
+    "If the input appears to be Bosnian, Croatian, or Serbian written without diacritics "
+    "(e.g. 'c' instead of 'č'/'ć', 's' instead of 'š', 'z' instead of 'ž', 'd' instead of 'đ'), "
+    "restore the correct diacritics throughout the text. "
+)
+
+
+def _correction_sys_msg(lang: str) -> str:
+    """Spell-correction prompt for text already written in `lang`.
+
+    `lang` is "Auto" when the language is unknown, which additionally pins the
+    output language so the model cannot drift.
+    """
+    if lang == "Auto":
+        return (
+            "You are a minimal spell and grammar corrector. "
+            + _CORRECTION_RULES + _AUTO_BHS_HINT + _CORRECTION_PRESERVE
+            + "Keep the output in the same language as the input text. "
+            + _CORRECTION_TAIL
+        )
+    label = "BHS (Bosnian/Croatian/Serbian)" if lang == "BHS" else lang
+    return (
+        f"You are a minimal spell and grammar corrector for {label}. "
+        + _CORRECTION_RULES
+        + (_BHS_DIACRITIC_RULES if lang == "BHS" else "")
+        + _CORRECTION_PRESERVE + _CORRECTION_TAIL
+    )
 
 
 def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", deterministic: bool = False,
@@ -145,11 +241,9 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
     deterministic=True forces temperature=0.0 (greedy decoding — always picks the
     single most probable token, so output is fully reproducible and consistent).
 
-    When working_language is "Auto", the prompt instructs the model to fix grammar
-    in whatever language the input is in.  When a specific language is set, the
-    prompt is restructured so translation is the *primary* instruction and grammar
-    correction is secondary — this prevents small models from latching onto the
-    "do not rewrite" clause and ignoring the language directive.
+    When working_language is "Auto", the prompt keeps the input language. For a
+    named language, positively matching text is corrected minimally; other text
+    is translated to the selected language and corrected there.
     """
     with _backend.lock:
         if _backend.client is None:
@@ -169,6 +263,9 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
             return None
 
         lang = (working_language or "Auto").strip()
+        # One predicate decides correct-vs-translate here AND drives the
+        # auto-replace safety checks in daemon.py; they must not diverge.
+        same_language = is_same_language(text, lang)
 
         if diacritics_only:
             # Single source of truth: the "Diacritics Only" mode prompt in
@@ -194,58 +291,19 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
             raw = _strip_reasoning(raw)
             return raw.strip()
 
+        # Give the model unambiguous spellings for the curated BHS words up
+        # front. Output-only cleanup cannot recover a token the model deleted
+        # after misreading "cesce" as "ćeš".
+        prompt_text = _restore_common_bhs(text) if lang == "BHS" else text
+
         if lang == "Auto":
-            sys_msg = (
-                "You are a minimal spell and grammar corrector. "
-                "Your ONLY job is to fix clear errors: misspelled words, wrong capitalization, "
-                "missing or wrong punctuation, and broken spacing. "
-                "If the input appears to be Bosnian, Croatian, or Serbian written without diacritics "
-                "(e.g. 'c' instead of 'č'/'ć', 's' instead of 'š', 'z' instead of 'ž', 'd' instead of 'đ'), "
-                "restore the correct diacritics throughout the text. "
-                "IMPORTANT: Preserve all brand names, camelCase words, code variables, URLs, paths, and email addresses exactly as written. Do NOT change their casing or spelling. "
-                "Do NOT substitute any correctly spelled word with a synonym — even if you think "
-                "a different word sounds better, leave it exactly as written. "
-                "Do NOT restructure, rephrase, or reorder any part of the sentence. "
-                "Do NOT add words, remove words, or change sentence structure. "
-                "Make the smallest possible change to fix each error and leave everything else untouched. "
-                "Keep the output in the same language as the input text. "
-                "Preserve existing commas unless they are clearly wrong. "
-                "Ensure there is one space after sentence-ending punctuation before the next sentence. "
-                "Return ONLY the corrected text. No explanation. No extra lines. "
-                "If there are no errors, return the text exactly as given."
-            )
-        elif lang in _SLAVIC_LANGS:
-            # Correction-first prompt for South Slavic languages (BHS).
-            # The user is typing IN this language already, so a translation-first
-            # prompt ("translate BHS → BHS") confuses small models and they
-            # return the text unchanged, leaving missing diacritics uncorrected.
-            sys_msg = (
-                "You are a minimal spell and grammar corrector for BHS (Bosnian/Croatian/Serbian). "
-                "Your ONLY job is to fix clear errors: misspelled words, wrong capitalization, "
-                "missing or wrong punctuation, and broken spacing. "
-                "The input may be written without some or all diacritics "
-                "(e.g. 'c' instead of 'č'/'ć', 's' instead of 'š', 'z' instead of 'ž', 'd' instead of 'đ'). "
-                "Restore the correct BHS diacritics where they are missing. "
-                "IMPORTANT: The ONLY diacritical characters used in BHS are: š, č, ć, ž, đ "
-                "(and their uppercase forms Š, Č, Ć, Ž, Đ). "
-                "Do NOT introduce any other Unicode or accented characters (e.g. ǒ, ù, ó, à, â, etc.). "
-                "Output BHS in LATIN script only — never use Cyrillic letters. "
-                "Do NOT add diacritics to words that are already spelled correctly without them. "
-                "IMPORTANT: Preserve all brand names, camelCase words, code variables, URLs, paths, and email addresses exactly as written. Do NOT change their casing or spelling. "
-                "Common BHS words that need diacritics: 'cao'->'ćao', 'ces'->'ćeš', 'hoces'->'hoćeš', "
-                "'neces'->'nećeš', 'mozes'->'možeš', 'ides'->'ideš', 'jesi'->'jesi' (no change), "
-                "'sta'->'šta', 'sto'->'što', 'vise'->'više', 'nase'->'naše', 'vase'->'vaše', "
-                "'isao'->'išao', 'dosao'->'došao', 'nasao'->'našao', 'prosao'->'prošao', 'cesto'->'često'. "
-                "Do NOT substitute any correctly spelled word with a synonym — even if you think "
-                "a different word sounds better, leave it exactly as written. "
-                "Do NOT restructure, rephrase, or reorder any part of the sentence. "
-                "Do NOT add words, remove words, or change sentence structure. "
-                "Make the smallest possible change to fix each error and leave everything else untouched. "
-                "Preserve existing commas unless they are clearly wrong. "
-                "Ensure there is one space after sentence-ending punctuation before the next sentence. "
-                "Return ONLY the corrected text. No explanation. No extra lines. "
-                "If there are no errors, return the text exactly as given."
-            )
+            sys_msg = _correction_sys_msg("Auto")
+        elif same_language:
+            # Correction-first: the text is already in the working language, so a
+            # translation-first prompt ("translate German → German") confuses
+            # small models and they return the text unchanged, leaving errors —
+            # and, for BHS, missing diacritics — uncorrected.
+            sys_msg = _correction_sys_msg(lang)
         else:
             # Translation-first prompt: language directive comes first so small
             # models do not prioritise the grammar constraints over translation.
@@ -269,17 +327,17 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
                 f"Return ONLY the final {lang} text. No explanation. No extra lines."
             )
 
-        if lang == "Auto" or lang in _SLAVIC_LANGS:
+        if same_language:
             user_msg = (
                 f"Fix only clear spelling, grammar, punctuation, and diacritic errors. "
                 f"Do not change any correctly spelled word, do not use synonyms, "
-                f"do not rephrase:\n{text}"
+                f"do not rephrase:\n{prompt_text}"
             )
         else:
             user_msg = (
                 f"Translate naturally into {lang} — not word-for-word, but how a native speaker would say it. "
                 f"The input may be written without diacritics (š->s, č/ć->c, ž->z, đ->d) — interpret it correctly. "
-                f"Fix any grammar, spelling, and punctuation in the result:\n{text}"
+                f"Fix any grammar, spelling, and punctuation in the result:\n{prompt_text}"
             )
         prompt, stop = _build_prompt(fmt, sys_msg, user_msg)
         # Budget: for pure grammar correction the output length ≈ input length,
@@ -288,7 +346,7 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
         # Reasoning models (DeepSeek-R1, QwQ, etc.) emit a <think> block before
         # their answer — _get_thinking_budget() adds headroom for that so the
         # actual answer is never crowded out.
-        slack = 40 if (lang != "Auto" and lang not in _SLAVIC_LANGS) else 20
+        slack = 20 if same_language else 40
         thinking = _get_thinking_budget()
         max_tok = max(32, _word_count(text) * 3 + slack) + thinking
         out = _complete_prompt(
@@ -304,7 +362,7 @@ def spell_check_sentence(text: str, fmt: str, working_language: str = "Auto", de
         _maybe_flag_reasoning_model(raw)
         raw = _strip_reasoning(raw)
         result = raw.strip()
-        if lang in _SLAVIC_LANGS:
+        if lang == "BHS":   # script/diacritic clean-up is BHS-specific
             result = _sanitize_bhs_diacritics(result)
             result = _restore_common_bhs(result)
         result = _capitalize_sentences(result)
@@ -426,7 +484,15 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
             # Answer modes respond ABOUT the text, so the language directive
             # governs the answer itself ("explain this in my language") and the
             # user message must not ask for a rewrite.
-            answer_language = _answer_language_instruction(working_language)
+            answer_lang = working_language
+            if lang == "Auto":
+                # "Answer in the same language as the text" makes the MODEL
+                # identify the language, and small models get it wrong on dense
+                # prose — gemma-3-4b answered an English Hegel passage in French
+                # 5/5. Naming the language removes the guess. detect_language
+                # returns None when unsure, which keeps the old wording.
+                answer_lang = detect_language(text) or "Auto"
+            answer_language = _answer_language_instruction(answer_lang)
             sys_msg  = answer_language + base_msg
             # Repeat the answer-language requirement next to the source text.
             # This gives smaller local models a clear, recent instruction and
@@ -447,10 +513,16 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
         prompt, stop = _build_prompt(fmt, sys_msg, user_msg)
         max_tok = _calc_rephrase_max_tokens(text, sys_msg)
         temp = 0.0 if deterministic else creativity
+        # A strong repeat penalty makes small models shorten enumerations by
+        # silently dropping the last item.  On gemma-3-4b, Explain It retained
+        # all three source judgments in 20/20 runs at 1.1, but only 17/20 at
+        # 1.2 and 1.3.  Reading answers are short and do not need the heavier
+        # anti-loop setting used for open-ended rewrites.
+        repeat_penalty = 1.1 if _is_answer_mode(mode) else 1.3
 
         _first_chunk = True
         for chunk in _stream_prompt(
-            prompt, max_tokens=max_tok, temperature=temp, repeat_penalty=1.3,
+            prompt, max_tokens=max_tok, temperature=temp, repeat_penalty=repeat_penalty,
             stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
             messages=[
                 {"role": "system", "content": sys_msg},
@@ -635,6 +707,14 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
                 if piece:
                     yield piece
             return
+        if isinstance(_backend.client, _LlamaServerClient):
+            messages = _chat_history_to_messages(sys_msg, history)
+            stream = _backend.client.stream_messages(
+                messages,
+                max_tokens=max_tok,
+                temperature=0.7,
+                repeat_penalty=1.1,
+            )
         else:
             prompt, stop = _build_chat_prompt(fmt, sys_msg, history)
             stream = _backend.client(

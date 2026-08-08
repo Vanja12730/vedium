@@ -1,8 +1,11 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Isolated behavioral checks for CLI backend wiring.
 
 The real ``llm.py`` is loaded with tiny dependency fakes, so these tests need
 no desktop packages and can never execute an installed CLI.
-Run with: python cli_backend_wiring_tests.py
+Run with: python tests/cli_backend_wiring_tests.py
 """
 
 import importlib.util
@@ -13,7 +16,7 @@ import types
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "vedium"
 
 

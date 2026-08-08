@@ -1,10 +1,91 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import json
 import os
+import re
 import ctypes
 import ctypes.wintypes as wt
 import sys
 from . import constants as c
 from . import diagnostics
+from . import gguf
+
+
+# ── prompt-format detection ───────────────────────────────────────────────────
+# A GGUF ships the chat template it was trained with, so the right prompt format
+# can be read off the model instead of being kept in sync by hand. Each entry is
+# (marker in the chat template, FORMATS label); the list is ordered so that the
+# most distinctive markers win — Zephyr's <|user|> tags in particular would
+# otherwise match templates that merely mention the role names.
+_TEMPLATE_MARKERS = [
+    ("<|im_start|>",            "ChatML  (Qwen / Phi-3 / Yi)"),
+    ("<|start_header_id|>",     "Llama 3  (Meta)"),
+    ("<start_of_turn>",         "Gemma  (Google)"),
+    ("<|START_OF_TURN_TOKEN|>", "Command-R  (Cohere)"),
+    ("<|channel|>",             "Harmony  (gpt-oss)"),
+    ("### Instruction",         "Alpaca / Vicuna"),
+    ("[INST]",                  "Mistral / Mixtral"),
+    ("<|assistant|>",           "Zephyr / HF Chat"),
+]
+
+# Fallback when a GGUF carries no chat template: the architecture field.
+_ARCH_FORMATS = {
+    "gemma":  "Gemma  (Google)",
+    "gptoss": "Harmony  (gpt-oss)",
+    "qwen":   "ChatML  (Qwen / Phi-3 / Yi)",
+    "phi":    "ChatML  (Qwen / Phi-3 / Yi)",
+    "deepseek": "DeepSeek",
+    "command": "Command-R  (Cohere)",
+}
+
+# model_path -> detected label. Detection reads the file header, so cache it
+# rather than re-reading on every cfg lookup.
+_format_cache: dict = {}
+
+
+def detect_prompt_format(model_path: str):
+    """Prompt format implied by a GGUF's own chat template. None if unknown."""
+    if not model_path:
+        return None
+    if model_path in _format_cache:
+        return _format_cache[model_path]
+
+    meta = gguf.read_metadata(
+        model_path, ["tokenizer.chat_template", "general.architecture"])
+    template = str(meta.get("tokenizer.chat_template", ""))
+
+    fmt = None
+    for marker, label in _TEMPLATE_MARKERS:
+        if marker in template:
+            fmt = label
+            break
+    if fmt is None:
+        arch = str(meta.get("general.architecture", "")).lower()
+        for key, label in _ARCH_FORMATS.items():
+            if key in arch:
+                fmt = label
+                break
+
+    _format_cache[model_path] = fmt
+    return fmt
+
+
+def resolve_prompt_format(cfg: dict) -> str:
+    """The prompt format to actually use.
+
+    An explicit choice in the config always wins. On "Auto" the format is read
+    from the model; if that fails (no template, unreadable file, a backend with
+    no local GGUF at all) it falls back to ChatML, the previous default.
+    """
+    chosen = str(cfg.get("prompt_format", c.AUTO_FORMAT)).strip()
+    if chosen and chosen != c.AUTO_FORMAT:
+        return chosen
+
+    detected = detect_prompt_format(cfg.get("model_path", ""))
+    if detected:
+        return detected
+    return "ChatML  (Qwen / Phi-3 / Yi)"
 
 # Secrets are never stored in the config file. The cloud API key is read from
 # the environment so it can't leak if the config (or this whole folder) is
@@ -228,6 +309,59 @@ def _merge_custom_modes(cfg: dict):
     for name in list(c._REPHRASE_PROMPTS):
         if name not in c._BUILTIN_MODES and name not in custom:
             del c._REPHRASE_PROMPTS[name]
+
+
+def _parse_generated_style(text: str) -> tuple[str, str]:
+    """Return the AI-generated style name and profile, tolerating light Markdown."""
+    text = (text or "").strip()
+    name_match = re.search(
+        r"(?im)^\s*(?:[#*-]+\s*)?(?:\*\*)?STYLE NAME\s*:\s*(?:\*\*)?\s*(.+?)\s*$",
+        text,
+    )
+    profile_match = re.search(
+        r"(?im)^\s*(?:[#*-]+\s*)?(?:\*\*)?STYLE PROFILE\s*:\s*(?:\*\*)?\s*",
+        text,
+    )
+    name = re.sub(r"\s+", " ", name_match.group(1).strip(" \t#*_'\".")) if name_match else ""
+    if len(name) > 64:
+        name = name[:64].rstrip()
+    profile = text[profile_match.end():].strip() if profile_match else text
+    if name_match and not profile_match:
+        profile = (text[:name_match.start()] + text[name_match.end():]).strip()
+    return name or "New Writing Style", profile
+
+
+def _style_mode_prompt(profile: str) -> str:
+    """Wrap an extracted profile in the safety rules required by writing modes."""
+    return (
+        "Rewrite the following text using the writing style described below. "
+        "Match its voice, register, sentence rhythm, diction, paragraph structure, rhetorical habits, "
+        "imagery, and punctuation where the target text supports them. "
+        "Preserve the target text's meaning, facts, names, examples, qualifications, and level of certainty. "
+        "Do NOT copy distinctive phrases, metaphors, names, or subject matter from the reference sample. "
+        "Do NOT add facts, claims, examples, or conclusions.\n\n"
+        f"STYLE PROFILE:\n{profile.strip()}\n\n"
+        "Return ONLY the rewritten text. No explanation. No extra lines."
+    )
+
+
+def _add_generated_style_mode(cfg: dict, name: str, profile: str) -> None:
+    """Add an extracted style as a custom mode and select it for Improve Writing."""
+    name = (name or "").strip()
+    profile = (profile or "").strip()
+    if not name:
+        raise ValueError("Name cannot be empty.")
+    if not profile:
+        raise ValueError("Style profile cannot be empty.")
+    if name in c._BUILTIN_MODES:
+        raise ValueError("That name is reserved for a built-in mode.")
+    custom = dict(cfg.get("custom_rephrase_modes", {}))
+    if name in custom:
+        raise ValueError("A writing mode with that name already exists.")
+    custom[name] = _style_mode_prompt(profile)
+    cfg["custom_rephrase_modes"] = custom
+    cfg["rephrase_writing_mode"] = name
+    _merge_custom_modes(cfg)
 
 
 def load_cfg() -> dict:

@@ -1,3 +1,6 @@
+REM Copyright (C) 2026 vehab
+REM SPDX-License-Identifier: GPL-3.0-only
+
 @echo off
 cd /d "%~dp0"
 rem Interpreter preference:

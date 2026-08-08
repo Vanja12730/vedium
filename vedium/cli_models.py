@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """One-shot Claude Code and Codex CLI model support.
 
 This module is intentionally standalone and standard-library only.  It owns
@@ -107,9 +110,9 @@ def discover_antigravity_models(path: str, *, refresh: bool = False) -> list[str
 
     Nothing is hard-coded: whatever the installed CLI prints is what the app
     offers, so an agy update brings its new models along without an app change.
-    agy 1.1.5 prints stable slugs (``gemini-3.6-flash-high``) and accepts them
-    verbatim as ``--model``; older builds printed display labels, which it also
-    still accepts, so either form works unchanged.
+    agy 1.1.11 prints a stable slug plus a display label; 1.1.5 printed only
+    the slug, and older builds printed only display labels. All forms are kept
+    intact here and normalized by :func:`antigravity_model_entries`.
 
     The answer is cached for the life of the process.  Failures are not cached,
     so a CLI that is briefly unavailable is retried on the next pass.
@@ -139,18 +142,40 @@ def discover_antigravity_models(path: str, *, refresh: bool = False) -> list[str
 
 
 def antigravity_model_entries(models: list[str] | tuple[str, ...] = ()) -> list[dict]:
-    """Return the Antigravity default entry plus one entry per listed model."""
+    """Return the Antigravity default entry plus one entry per listed model.
+
+    Newer agy versions print ``slug<TAB>display name`` while older versions
+    printed either a slug or a display name on its own. Keep the stable first
+    column for ids and ``--model``, but retain the second column for the UI.
+    A future whitespace-aligned two-column format is handled the same way.
+    """
     entries = [{
         "id": "agy",
         "label": "Antigravity CLI default",
         "efforts": [],
         "agy_model": "",
     }]
-    for name in models:
+    seen_ids = {"agy"}
+    for listed_name in models:
+        raw = str(listed_name or "").strip()
+        if not raw:
+            continue
+        columns = re.split(r"(?:\t+| {2,})", raw, maxsplit=1)
+        if len(columns) == 2:
+            if (not re.fullmatch(r"[a-z0-9][a-z0-9._:/-]*", columns[0].strip())
+                    or not columns[1].strip()):
+                continue
+            name, display_name = (column.strip() for column in columns)
+        else:
+            name = display_name = raw
         slug = re.sub(r"[^a-z0-9.]+", "-", name.lower()).strip("-")
+        model_id = f"agy-{slug}"
+        if not slug or model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
         entries.append({
-            "id": f"agy-{slug}",
-            "label": f"{name} (Antigravity CLI)",
+            "id": model_id,
+            "label": f"{display_name} (Antigravity CLI)",
             "efforts": [],
             "agy_model": name,
         })

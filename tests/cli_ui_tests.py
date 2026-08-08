@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Focused Tkinter checks for the AI CLI settings and consent flow.
 
 Optional tray/keyboard dependencies are stubbed before importing Vedium. Model
@@ -14,7 +17,8 @@ import types
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 
 class _Keys:
@@ -208,4 +212,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

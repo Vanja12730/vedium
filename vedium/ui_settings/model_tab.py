@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Model tab: backend choice and the local / server / cloud / CLI panels."""
 
 import os

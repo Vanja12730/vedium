@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Appearance tab: colour theme picker and text size."""
 
 import tkinter as tk

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Standalone free-form AI chat window (tray menu: Chat with AI)."""
 
 import threading
@@ -5,7 +8,7 @@ import tkinter as tk
 
 from . import ui_thread
 from .ui_thread import _ui_call, _update_sv_ttk_theme
-from .config import save_cfg
+from .config import save_cfg, resolve_prompt_format
 from .llm import free_chat_stream, _stream_cancel, _streaming_answer, _strip_reasoning
 from .constants import (
     BG, SURFACE, SURF2, TEXT, MUTED, ACCENT, ACCENT2,
@@ -50,7 +53,7 @@ def _open_chat_window_ui(cfg: dict):
         except tk.TclError:
             _chat_win = None   # window was destroyed externally
 
-    fmt = cfg.get("prompt_format", "ChatML  (Qwen / Phi-3 / Yi)")
+    fmt = resolve_prompt_format(cfg)
 
     win = tk.Toplevel(ui_thread._UI_ROOT)
     win.title("Chat with AI")

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Settings window: shell, singleton, and the per-tab builders.
 
 The window is assembled here; each tab lives in its own submodule and
@@ -26,6 +29,16 @@ from .appearance_tab import _build_appearance_tab
 from .bottom_bar import _build_bottom_bar
 
 _settings_win = None   # module-level singleton reference
+_settings_ui = None    # live tab state, used when modes change outside Settings
+
+
+def _refresh_open_rephrase_modes():
+    """Refresh the Assistant tab after a style is created from an answer card."""
+    try:
+        if _settings_win is not None and _settings_win.winfo_exists() and _settings_ui is not None:
+            _settings_ui.refresh_rephrase_modes()
+    except tk.TclError:
+        pass
 
 
 def _open_settings(cfg: dict, on_cfg_saved, on_model_loaded):
@@ -45,10 +58,11 @@ class _SettingsUI:
 
 def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     """Create/focus Settings. Must run on the UI thread."""
-    global _settings_win
+    global _settings_win, _settings_ui
     _update_sv_ttk_theme()
     try:
         if _settings_win is not None and _settings_win.winfo_exists():
+            _refresh_open_rephrase_modes()
             _settings_win.deiconify()   # restore if minimised to taskbar
             _settings_win.lift()
             _settings_win.focus_force()
@@ -92,7 +106,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     win.minsize(760, 420)
 
     def on_close():
-        global _settings_win
+        global _settings_win, _settings_ui
         if sys.platform == "linux":
             win.unbind_all("<Button-4>")
             win.unbind_all("<Button-5>")
@@ -108,6 +122,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
         except Exception:
             pass
         _settings_win = None
+        _settings_ui = None
         win.destroy()
 
     win.protocol("WM_DELETE_WINDOW", on_close)
@@ -308,6 +323,7 @@ def _open_settings_ui(cfg: dict, on_cfg_saved, on_model_loaded):
     _build_rephrase_tab(ui)
     _build_appearance_tab(ui)
     _build_bottom_bar(ui)
+    _settings_ui = ui
 
     win.lift()
     win.focus_force()

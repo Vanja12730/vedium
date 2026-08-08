@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Shared mutable state for the LLM layer.
 
 Lives in its own module so llm_backends and llm_postprocess can both use
@@ -13,7 +16,7 @@ class _ActiveBackend:
     """The currently connected backend: client, identity, and its guard lock.
 
     ``client`` is whatever object answers the llama-style call interface
-    (llama_cpp.Llama, _LlamaServerClient, _CloudClient, or CLIClient);
+    (_LlamaServerClient, _CloudClient, or CLIClient);
     ``path`` identifies the model file / server URL / cloud model; ``label``
     is the human-readable name shown in the UI.  Mutate only while holding
     ``lock`` -- generation paths hold it for entire calls so two pipelines

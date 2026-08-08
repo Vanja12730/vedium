@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 import os
 import sys
 import time
@@ -12,7 +15,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 
 # Import the package under test.  These are white-box tests, so they reach into
 # the submodules directly rather than through a package-level facade.
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from vedium import (
     buffer,
     config,

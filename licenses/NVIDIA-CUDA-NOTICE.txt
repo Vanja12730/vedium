@@ -1,0 +1,11 @@
+NVIDIA CUDA Runtime Notice
+
+When the NVIDIA local engine is selected, Vedium downloads the CUDA 12.4
+llama.cpp distribution and its matching CUDA runtime archive from the official
+llama.cpp GitHub release. The NVIDIA runtime libraries remain governed by the
+NVIDIA Software License Agreement:
+
+https://docs.nvidia.com/cuda/eula/index.html
+
+NVIDIA, CUDA, and related marks are trademarks and/or registered trademarks of
+NVIDIA Corporation. Vedium is not affiliated with or endorsed by NVIDIA.

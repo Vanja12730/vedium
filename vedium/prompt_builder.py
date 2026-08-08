@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 # ── 3. PROMPT BUILDER ─────────────────────────────────────────────────────────
 # Converts (format, system_msg, user_msg) into a raw prompt string + stop tokens.
 # Add a new elif branch here to support additional model families.
@@ -50,21 +53,33 @@ def _build_prompt(fmt: str, system: str, user: str):
     elif fmt.startswith("Harmony"):
         # gpt-oss (OpenAI Harmony format).  The assistant turn is primed with
         # the "final" channel header so the model answers directly instead of
-        # first emitting an "analysis" (chain-of-thought) message.  This
-        # matters doubly here: the in-process llama-cpp path drops special
-        # tokens (<|channel|>, <|message|>, …) during detokenisation, so any
-        # leaked analysis text would arrive without markers and be very hard
-        # to separate from the answer.  "Reasoning: low" reinforces the same
-        # intent; app instructions go in the developer role per the spec.
+        # first emitting an "analysis" (chain-of-thought) message.
+        # "Reasoning: low" reinforces the same intent; app instructions go in
+        # the developer role per the spec.
+        #
+        # The priming and the stop list below are LOAD-BEARING TOGETHER — do not
+        # change one without the other.  Measured against gpt-oss-20b-MXFP4:
+        #   * <|end|> is NOT an end-of-generation token in this GGUF (only
+        #     <|return|>, <|call|> and <|endoftext|> are), so nothing stops the
+        #     model at a message boundary except the "<|end|>" *string* stop.
+        #   * <|start|>, <|end|>, <|channel|> and <|message|> are user-defined
+        #     rather than control tokens, so llama-cpp detokenises them to their
+        #     literal text instead of dropping them.
+        # Consequence: drop the "final" priming and the model opens an analysis
+        # message, whose closing <|end|> then trips the string stop — so the call
+        # returns pure chain-of-thought and the answer never arrives.  Removing
+        # "<|end|>" from the stop list instead lets generation run on into a
+        # second assistant turn.  Any change here needs both sides reworked plus
+        # a re-test of _strip_channels().
         p = ("<|start|>system<|message|>Reasoning: low\n\n"
              "# Valid channels: analysis, commentary, final. "
              "Channel must be included for every message.<|end|>"
              f"<|start|>developer<|message|># Instructions\n\n{system}<|end|>"
              f"<|start|>user<|message|>{user}<|end|>"
              "<|start|>assistant<|channel|>final<|message|>")
-        # <|return|>/<|end|> are EOG tokens, so in-process generation stops at
-        # the token level; the string stops matter for the llama-server path,
-        # which renders special tokens as text.
+        # <|return|> is a real EOG token; <|end|> and <|start|> are not, so on
+        # BOTH the in-process and llama-server paths they only take effect as
+        # string stops (see the note above).
         s = ["<|return|>", "<|end|>", "<|start|>"]
 
     else:  # Plain / fallback

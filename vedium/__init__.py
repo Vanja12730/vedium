@@ -1,3 +1,6 @@
+# Copyright (C) 2026 vehab
+# SPDX-License-Identifier: GPL-3.0-only
+
 """Vedium (vedium) package.
 
 The package is composed of focused submodules that import one another with
