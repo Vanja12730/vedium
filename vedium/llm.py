@@ -622,6 +622,48 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
                 yield piece
 
 
+# ── free-form chat budgets ───────────────────────────────────────────────────
+# How long a chat answer should be has nothing to do with how long the question
+# was: "can you give an example" routinely deserves several hundred tokens.  So
+# the reply gets a flat, generous allowance and only the context window trims it.
+_CHAT_REPLY_TOKENS = 2048
+# Context space kept free for that reply.  Once a conversation grows past it the
+# oldest turns are dropped, rather than squeezing the answer to nothing or
+# refusing the whole chat.
+_CHAT_REPLY_RESERVE = 512
+
+
+def _chat_prompt_tokens(history: list) -> int:
+    """Estimate a chat prompt's token cost: ~200 for the system/template
+    scaffolding plus ~1.5 tokens per word of conversation."""
+    words = sum(_word_count(turn["content"]) for turn in history)
+    return 200 + int(words * 1.5)
+
+
+def _fit_chat_history(history: list, n_ctx: int, reserve: int) -> tuple:
+    """Drop the oldest turns until `reserve` tokens stay free for the reply.
+
+    Returns (turns_to_send, dropped_count) without mutating the caller's list —
+    the chat window keeps showing the full transcript.  The newest turn is never
+    dropped; if it alone does not fit, the caller reports the overflow.
+
+    The result always starts on a user turn: _build_chat_prompt folds the system
+    message into history[0] only when that turn is a user turn (Gemma, Mistral),
+    and llama-server's native Gemma template rejects a conversation that does not
+    start with `user`.  A dangling assistant reply at the head would therefore
+    either silently lose the system prompt or fail the request outright.
+    """
+    kept = list(history)
+    dropped = 0
+    while len(kept) > 1 and _chat_prompt_tokens(kept) + reserve > n_ctx:
+        kept.pop(0)
+        dropped += 1
+        while len(kept) > 1 and kept[0]["role"] != "user":
+            kept.pop(0)
+            dropped += 1
+    return kept, dropped
+
+
 def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
     """
     Free-form multi-turn chat with the loaded LLM.
@@ -632,9 +674,11 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
 
     Uses _build_chat_prompt() so all supported model families work correctly.
 
-    Output token budget is clamped to available n_ctx space so long conversations
-    don't overflow the context window.  Falls back to an empty stream if no model
-    is loaded.
+    The reply gets a flat _CHAT_REPLY_TOKENS budget, clamped only by the space
+    the conversation genuinely leaves free.  Once a conversation outgrows the
+    context window the oldest turns are dropped (logged to diagnostics) so chat
+    keeps working instead of hitting a wall.  Falls back to an empty stream if no
+    model is loaded.
 
     _backend.lock is held for the entire streaming call — same rationale as
     rephrase_sentence_stream.  The _stream_cancel event lets the chat window
@@ -656,27 +700,42 @@ def free_chat_stream(history: list, fmt: str, cfg: dict | None = None):
             "Answer the user's questions clearly and directly."
         )
 
-        # Token budget: generous for chat; clamp to available context window.
-        total_input_words = sum(_word_count(t["content"]) for t in history)
-        max_tok = max(256, min(1024, total_input_words * 2))
+        # Reply budget.  This was previously `input_words * 2` capped at 1024,
+        # which tied answer length to question length: a short follow-up such as
+        # "can you give an example" earned ~300 tokens and was cut off
+        # mid-sentence while thousands of context tokens sat unused.
+        max_tok = _CHAT_REPLY_TOKENS
         try:
-            n_ctx = _backend.client.context_params.n_ctx
-            prompt_overhead = 200 + int(total_input_words * 1.5)
-            if prompt_overhead >= n_ctx:
-                # The accumulated conversation is already too large to fit in
-                # the KV cache.  Passing the prompt to llama.cpp would raise an
-                # unrecoverable exception (caught silently downstream), leaving
-                # the chat window frozen with no feedback.  Surface a clear
-                # message instead so the user knows what happened and can act.
+            n_ctx = int(_backend.client.context_params.n_ctx)
+        except Exception:
+            n_ctx = 0
+
+        if n_ctx <= 0:
+            # n_ctx unreadable (e.g. a llama-server whose /props predates the
+            # field): stay conservative rather than overflowing the KV cache.
+            max_tok = min(max_tok, 1024)
+        else:
+            history, dropped = _fit_chat_history(history, n_ctx, _CHAT_REPLY_RESERVE)
+            if dropped:
+                diagnostics.record_throttled(
+                    "chat", "info",
+                    f"Chat history trimmed to fit the {n_ctx}-token context window.",
+                    f"Dropped the {dropped} oldest turn(s).",
+                    cooldown_sec=60.0,
+                )
+            free = n_ctx - _chat_prompt_tokens(history)
+            if free < 64:
+                # Nothing left to trim — a single message is too big to fit in
+                # the KV cache at all.  Passing it on would raise inside
+                # llama.cpp (caught silently downstream) and leave the chat
+                # window frozen with no feedback, so say what happened instead.
                 yield (
-                    "\n\n[Conversation too long for the current context window "
-                    f"({n_ctx} tokens).  Please start a new chat or load a "
-                    "model with a larger context window.]\n"
+                    "\n\n[That message is too long for the current context window "
+                    f"({n_ctx} tokens).  Send a shorter message, or raise "
+                    "Context size in Settings → Model.]\n"
                 )
                 return
-            max_tok = max(64, min(max_tok, n_ctx - prompt_overhead))
-        except Exception:
-            max_tok = min(max_tok, 2048)
+            max_tok = max(64, min(max_tok, free))
 
         if isinstance(_backend.client, CLIClient):
             messages = _chat_history_to_messages(sys_msg, history)
