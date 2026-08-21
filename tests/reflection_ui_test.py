@@ -359,6 +359,78 @@ check("both senses retained",
 close_card(card)
 
 # An empty term is refused rather than writing a headingless entry.
+# Reading follow-ups retain context and branch with answer history.
+source_text = "A source passage with a deliberately incomplete reason."
+initial_text = "The source gives a reason but does not fully explain it."
+card = make_card("Explain It (Simply)", source_text, initial_text, cfg)
+toast_win = [w for w in find_widgets(root, tk.Toplevel)
+             if w.winfo_exists() and w.title() == "Explain It (Simply)"]
+chat_entries = find_widgets(toast_win[0], tk.Entry) if toast_win else []
+send_buttons = [b for b in find_widgets(toast_win[0], tk.Button)
+                if "Send" in b.cget("text")] if toast_win else []
+back_buttons = [b for b in find_widgets(toast_win[0], tk.Button)
+                if b.cget("text") == "←"] if toast_win else []
+followup_calls = []
+followup_replies = iter(("First answer.", "Second answer.", "Branched answer."))
+
+
+def _fake_reading_followup(source, initial, prior, instruction, fmt,
+                           mode="", cfg=None, on_fallback=None):
+    followup_calls.append({
+        "source": source,
+        "initial": initial,
+        "prior": [dict(turn) for turn in prior],
+        "instruction": instruction,
+        "mode": mode,
+    })
+    yield next(followup_replies)
+
+
+def _send_followup(question, expected):
+    chat_entries[0].delete(0, "end")
+    chat_entries[0].insert(0, question)
+    send_buttons[0].invoke()
+    for _ in range(150):
+        pump()
+        shown = card._txt.get("1.0", "end-1c") if card._txt is not None else ""
+        if str(send_buttons[0].cget("state")) == "normal" and shown == expected:
+            return
+        time.sleep(0.01)
+
+
+original_followup = ui_toasts.reading_followup_stream
+ui_toasts.reading_followup_stream = _fake_reading_followup
+if chat_entries and send_buttons and back_buttons:
+    _send_followup("First question?", "First answer.")
+    _send_followup("Second question?", "Second answer.")
+    back_buttons[0].invoke()
+    root.update()
+    _send_followup("Branched question?", "Branched answer.")
+ui_toasts.reading_followup_stream = original_followup
+
+check("reading follow-up UI exercised three turns", len(followup_calls) == 3,
+      str(followup_calls))
+if len(followup_calls) == 3:
+    first_pair = [
+        {"role": "user", "content": "First question?"},
+        {"role": "assistant", "content": "First answer."},
+    ]
+    check("reading follow-up retains source, mode, and initial answer",
+          all(call["source"] == source_text
+              and call["initial"] == initial_text
+              and call["mode"] == "Explain It (Simply)"
+              for call in followup_calls), str(followup_calls))
+    check("second follow-up receives the first complete turn",
+          followup_calls[1]["prior"] == first_pair,
+          str(followup_calls[1]["prior"]))
+    check("answer-history back creates a clean conversation branch",
+          followup_calls[2]["prior"] == first_pair
+          and all("Second" not in turn["content"]
+                  for turn in followup_calls[2]["prior"]),
+          str(followup_calls[2]["prior"]))
+close_card(card)
+
+# A failed follow-up chat must not offer to save an empty definition.
 card = make_card("Define This", "liminal", "A definition.", cfg)
 refused = []
 
@@ -505,8 +577,8 @@ def _explode(*a, **k):
     raise RuntimeError("backend down")
 
 
-original_chat = ui_toasts.chat_with_text_stream
-ui_toasts.chat_with_text_stream = _explode
+original_chat = ui_toasts.reading_followup_stream
+ui_toasts.reading_followup_stream = _explode
 if chat_entries and send_buttons:
     chat_entries[0].delete(0, "end")
     chat_entries[0].insert(0, "make it shorter")
@@ -516,7 +588,7 @@ if chat_entries and send_buttons:
         if str(send_buttons[0].cget("state")) == "normal":
             break
         time.sleep(0.02)
-ui_toasts.chat_with_text_stream = original_chat
+ui_toasts.reading_followup_stream = original_chat
 check("the failed chat finished", bool(send_buttons) and
       str(send_buttons[0].cget("state")) == "normal")
 check("a failed chat over empty text keeps vocabulary saving disabled",

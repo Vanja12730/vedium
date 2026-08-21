@@ -622,6 +622,93 @@ def chat_with_text_stream(text: str, user_instruction: str, fmt: str,
                 yield piece
 
 
+_READING_FOLLOWUP_SYSTEM = (
+    "You are continuing a reading-assistant conversation about a supplied source passage. "
+    "Answer the latest question directly and concisely. Use earlier answers only to understand "
+    "references, never as evidence about the source. When the user asks what the source says, "
+    "means, explains, or establishes, ground every claim in the source. Do not invent missing "
+    "reasons, details, context, motives, implications, or conclusions. If the source gives only "
+    "a vague reason or leaves the requested detail unstated, state both what it says and what it "
+    "does not explain. Preserve every negation, contrast, qualification, attribution, and level "
+    "of certainty; never reverse the source's meaning. If a question can be answered yes or no, "
+    "begin with Yes or No and always add a brief explanation unless the user explicitly asks for "
+    "a one-word answer. If the user explicitly asks for background, an example, or other "
+    "information beyond the source, you may provide it, but clearly distinguish it from what the "
+    "source states. Answer in the language of the user's latest question unless asked otherwise. "
+    "Use one to three complete sentences by default."
+)
+
+
+def reading_followup_stream(source_text: str, initial_answer: str,
+                            prior_turns: list[dict], user_instruction: str,
+                            fmt: str, mode: str = "",
+                            cfg: dict | None = None, on_fallback=None):
+    """Continue a grounded, multi-turn conversation from a reading answer card.
+
+    ``prior_turns`` contains only follow-up user/assistant pairs.  The original
+    source and initial mode answer are replayed separately so every turn retains
+    its evidence boundary and references such as "that" or "the second part"
+    remain meaningful.  Writing-card edits intentionally continue to use
+    :func:`chat_with_text_stream`, whose free-form rewrite contract is different.
+    """
+    with _backend.lock:
+        if _backend.client is None:
+            diagnostics.set_status(backend="None")
+            diagnostics.record_throttled(
+                "backend", "warning",
+                "No AI backend is connected; reading follow-up skipped.",
+                cooldown_sec=20.0,
+            )
+            yield initial_answer
+            return
+
+        mode_name = (mode or "Reading answer").strip()
+        history = [{
+            "role": "user",
+            "content": (
+                f"Source passage:\n{source_text}\n\n"
+                f"The reading mode was {mode_name}. Provide the initial reading answer."
+            ),
+        }, {
+            "role": "assistant",
+            "content": initial_answer,
+        }]
+        history.extend(
+            {"role": turn.get("role", "user"), "content": str(turn.get("content", ""))}
+            for turn in prior_turns
+            if turn.get("role") in ("user", "assistant")
+            and str(turn.get("content", "")).strip()
+        )
+        history.append({"role": "user", "content": user_instruction})
+
+        total_words = _word_count(source_text) + sum(
+            _word_count(turn["content"]) for turn in history[1:]
+        )
+        max_tok = max(192, min(768, total_words * 2))
+        try:
+            n_ctx = _backend.client.context_params.n_ctx
+            prompt_overhead = 260 + int(total_words * 1.5)
+            max_tok = max(64, min(max_tok, n_ctx - prompt_overhead))
+        except Exception:
+            max_tok = min(max_tok, 768)
+
+        prompt, stop = _build_chat_prompt(fmt, _READING_FOLLOWUP_SYSTEM, history)
+        messages = _chat_history_to_messages(_READING_FOLLOWUP_SYSTEM, history)
+        for chunk in _stream_prompt(
+            prompt, max_tokens=max_tok, temperature=0.25, repeat_penalty=1.1,
+            stop=stop, echo=False, cfg=cfg, on_fallback=on_fallback,
+            messages=messages,
+        ):
+            if _stream_cancel.is_set():
+                return
+            try:
+                piece = chunk["choices"][0].get("text", "")
+            except Exception:
+                piece = ""
+            if piece:
+                yield piece
+
+
 # ── free-form chat budgets ───────────────────────────────────────────────────
 # How long a chat answer should be has nothing to do with how long the question
 # was: "can you give an example" routinely deserves several hundred tokens.  So

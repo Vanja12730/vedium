@@ -58,6 +58,21 @@ def _active_window_token() -> int | None:
         return None
 
 
+def _window_process_id(window: int | None) -> int | None:
+    """Return the owning process ID for a Windows foreground-window token."""
+    if not window or sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        process_id = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(
+            ctypes.c_void_p(window), ctypes.byref(process_id)
+        )
+        return int(process_id.value) if process_id.value else None
+    except Exception:
+        return None
+
+
 def _ensure_expected_window(expected_window: int | None):
     """Refuse to paste if focus moved away from the captured target window."""
     if not expected_window or sys.platform != "win32":

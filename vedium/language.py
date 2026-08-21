@@ -131,15 +131,22 @@ def is_same_language(text: str, working_language: str) -> bool:
 
     Auto counts as "same" — there is no target language to translate into.
 
-    Detection failure counts as DIFFERENT, i.e. translate. For this targeted
-    question the minimum is lowered to one recognised word, but the normal
-    winner/runner-up ratio still applies: "ein sehr schoner Tag" is positively
-    German, while an input with no German evidence still translates to German.
+    Detection failure normally counts as DIFFERENT, i.e. translate. For this
+    targeted question the minimum is lowered to one recognised word, but the
+    normal winner/runner-up ratio still applies: "ein sehr schoner Tag" is
+    positively German, while an input with no German evidence still translates
+    to German. The BHS ambiguity exception is documented below.
     """
     lang = (working_language or "Auto").strip()
     if lang == "Auto":
         return True
     from vedium.constants import _NATIVE_TYPING_LANGS
+    detected = detect_language(text, min_hits=1)
     if lang in _NATIVE_TYPING_LANGS:
-        return True
-    return detect_language(text, min_hits=1) == lang
+        # BHS typed without diacritics is often too short or ambiguous for the
+        # detector, so uncertainty still means "correct as BHS". Positive
+        # evidence that the sentence is another language, however, must honour
+        # the selected working language and translate it to BHS just like every
+        # other named language.
+        return detected in (None, lang)
+    return detected == lang

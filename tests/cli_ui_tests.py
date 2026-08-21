@@ -9,6 +9,7 @@ and CLI calls are stubbed, so this test spends no subscription usage.
 
 import copy
 import json
+import queue
 import sys
 import tempfile
 import threading
@@ -73,6 +74,23 @@ def _walk(parent):
     return result
 
 
+def _pump_ui_callbacks():
+    """Mirror ui_thread's mainloop pump in this single-threaded UI harness."""
+    while True:
+        try:
+            fn, args, kwargs, done, box = ui_thread._UI_QUEUE.get_nowait()
+        except queue.Empty:
+            return
+        try:
+            box["result"] = fn(*args, **kwargs)
+        except Exception as exc:
+            box["error"] = exc
+            raise
+        finally:
+            if done is not None:
+                done.set()
+
+
 def main() -> int:
     tmp = tempfile.TemporaryDirectory(prefix="vedium_cli_ui_")
     c.CONFIG_FILE = str(Path(tmp.name) / "vedium_config.json")
@@ -89,18 +107,24 @@ def main() -> int:
     model_tab.detect_local_server = lambda *a, **k: ""
     bottom_bar.connect_cloud = model_tab.connect_cloud
     bottom_bar.connect_server = model_tab.connect_server
-    model_tab.detect_clis = lambda **_kwargs: {
-        "claude": {
-            "path": r"C:\stub\claude.cmd",
-            "models": [{
-                "id": "claude-haiku",
-                "label": "Claude Code - Haiku",
-                "efforts": ["low", "medium", "high"],
-            }],
-        },
-        "codex": {"path": None, "default_model": "", "models": []},
-        "antigravity": {"path": None, "models": []},
-    }
+    detect_calls = []
+
+    def _detect_clis(**kwargs):
+        detect_calls.append(kwargs)
+        return {
+            "claude": {
+                "path": r"C:\stub\claude.cmd",
+                "models": [{
+                    "id": "claude-haiku",
+                    "label": "Claude Code - Haiku",
+                    "efforts": ["low", "medium", "high"],
+                }],
+            },
+            "codex": {"path": None, "default_model": "", "models": []},
+            "antigravity": {"path": None, "models": []},
+        }
+
+    model_tab.detect_clis = _detect_clis
     connect_calls = []
     connected = threading.Event()
 
@@ -135,9 +159,10 @@ def main() -> int:
 
     widgets = _walk(win)
     labels = [widget.cget("text") for widget in widgets if isinstance(widget, tk.Label)]
-    assert any("Claude Code: found" in text for text in labels)
-    assert any("Codex CLI: not found on PATH" in text for text in labels)
-    assert any("Antigravity CLI: not found on PATH" in text for text in labels)
+    assert any("Claude Code: not checked" in text for text in labels)
+    assert any("Codex CLI: not checked" in text for text in labels)
+    assert any("Antigravity CLI: not checked" in text for text in labels)
+    assert detect_calls == [], "opening Settings must not launch disabled AI CLIs"
 
     toggles = {
         widget.label.cget("text"): widget
@@ -152,9 +177,20 @@ def main() -> int:
     main_toggle.invoke()
     win.update()
     assert main_toggle.variable.get() is False
+    assert detect_calls == [], "declining consent must not launch AI CLIs"
     main_toggle.invoke()
-    win.update()
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        _pump_ui_callbacks()
+        win.update()
+        if detect_calls and any(
+            isinstance(widget, tk.Label) and "Claude Code: found" in widget.cget("text")
+            for widget in _walk(win)
+        ):
+            break
+        time.sleep(0.01)
     assert main_toggle.variable.get() is True
+    assert detect_calls == [{"refresh": True}]
 
     cli_model = next(
         widget for widget in _walk(win)

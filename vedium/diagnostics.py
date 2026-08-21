@@ -11,7 +11,7 @@ _EVENTS = deque(maxlen=80)
 _THROTTLE = {}
 _STATE = {
     "enabled": True,
-    "spell_check_mode": "Auto",
+    "spell_check_mode": "Off",
     "backend_mode": "local",
     "backend": "None",
     "backend_detail": "",

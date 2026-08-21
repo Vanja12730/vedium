@@ -8,7 +8,15 @@ import tkinter.ttk as ttk
 
 from .. import diagnostics
 from ..config import save_cfg
-from ..constants import BG, SURFACE, TEXT, MUTED, ACCENT2, FONT_B, WORKING_LANGUAGE_OPTIONS
+from ..constants import (
+    BG, SURFACE, TEXT, MUTED, ACCENT2, FONT_B, WORKING_LANGUAGE_OPTIONS,
+    DEFAULT_TRIGGER_CHARS,
+)
+from ..hotkeys import (
+    TOAST_ACCEPT_HOTKEY_OPTIONS,
+    normalize_toast_accept_hotkey,
+    toast_accept_hotkey_display,
+)
 from ..ui_widgets import _add_tooltip, _make_toggle, lbl_row, _TGL_INDENT
 
 
@@ -62,7 +70,7 @@ def _build_behaviour_tab(ui):
 
     # ── Spell-check mode radio group ─────────────────────────────────────────
     # Three options in one row: Auto (silent replace) / Toast / Off.
-    sc_mode_var = tk.StringVar(master=win, value=cfg.get("spell_check_mode", "Auto"))
+    sc_mode_var = tk.StringVar(master=win, value=cfg.get("spell_check_mode", "Off"))
     lbl_row("Spell-check", 1, frm_behaviour)
     sc_frame = tk.Frame(frm_behaviour, bg=BG)
     sc_frame.grid(row=1, column=1, sticky="w", pady=7)
@@ -83,6 +91,44 @@ def _build_behaviour_tab(ui):
     tk.Label(sc_frame,
              text="Off disables sentence correction; both Assistant hotkeys still work",
              font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w", pady=(2, 0))
+
+    # The primary review-card action used to be fixed at Ctrl+Enter. Keep that
+    # default, but let users choose an alternative without editing JSON by hand.
+    shortcut_values = [
+        toast_accept_hotkey_display(value)
+        for value in TOAST_ACCEPT_HOTKEY_OPTIONS
+    ]
+    shortcut_by_display = dict(zip(shortcut_values, TOAST_ACCEPT_HOTKEY_OPTIONS))
+    toast_hotkey_var = tk.StringVar(
+        master=win,
+        value=toast_accept_hotkey_display(cfg.get("toast_accept_hotkey")),
+    )
+    shortcut_row = tk.Frame(sc_frame, bg=BG)
+    shortcut_row.pack(anchor="w", pady=(7, 0))
+    tk.Label(shortcut_row, text="Replace shortcut", font=("Segoe UI", 8, "bold"),
+             bg=BG, fg=TEXT).pack(side="left", padx=(0, 8))
+    toast_hotkey_cb = ttk.Combobox(
+        shortcut_row, textvariable=toast_hotkey_var, values=shortcut_values,
+        state="readonly", font=FONT_B, width=18,
+    )
+    toast_hotkey_cb.pack(side="left")
+    _bind_scroll(toast_hotkey_cb)
+
+    def _commit_toast_hotkey(_event=None):
+        stored = normalize_toast_accept_hotkey(
+            shortcut_by_display.get(toast_hotkey_var.get())
+        )
+        _commit(
+            "toast_accept_hotkey", stored,
+            f"Toast replacement shortcut set to {toast_accept_hotkey_display(stored)}.",
+        )
+
+    toast_hotkey_cb.bind("<<ComboboxSelected>>", _commit_toast_hotkey)
+    tk.Label(
+        sc_frame,
+        text="Works from the app you are typing in; the toast does not need focus",
+        font=("Segoe UI", 8), bg=BG, fg=MUTED,
+    ).pack(anchor="w", pady=(2, 0))
 
     # ── Diacritics-only auto toggle ───────────────────────────────────────────
     diacr_var = tk.BooleanVar(master=win, value=cfg.get("diacritics_only_auto", False))
@@ -116,7 +162,7 @@ def _build_behaviour_tab(ui):
         (";",  "Semicolon  ;"),
         (":",  "Colon  :"),
     ]
-    _trig_current = list(cfg.get("trigger_chars", ".!?"))
+    _trig_current = list(cfg.get("trigger_chars", DEFAULT_TRIGGER_CHARS))
     _trig_vars: dict[str, tk.BooleanVar] = {}
     for _ch, _ in _TRIGGER_OPTIONS:
         v = tk.BooleanVar(master=win, value=_ch in _trig_current)
@@ -222,5 +268,6 @@ def _build_behaviour_tab(ui):
 
     # ── publish shared state ──────────────────────────────────────────────────
     ui.lang_var, ui.sc_mode_var, ui.diacr_var = lang_var, sc_mode_var, diacr_var
+    ui.toast_hotkey_var = toast_hotkey_var
     ui.trig_string = _trig_string
     ui.min_var, ui.idle_var = min_var, idle_var

@@ -68,6 +68,60 @@ To use a **local model** from a source checkout, put a current
 its full path. See [GPU_INSTALL_GUIDE.md](GPU_INSTALL_GUIDE.md). Cloud API and
 CLI backends need nothing extra.
 
+## Optional CLI backends
+
+Vedium can use an AI CLI that is already installed and signed in. You only
+need **one** of the following. On Windows, open PowerShell and run the relevant
+official installer:
+
+### Codex CLI
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+codex
+```
+
+The first run asks you to sign in. See the [Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
+
+### Google Antigravity CLI (`agy`)
+
+```powershell
+irm https://antigravity.google/cli/install.ps1 | iex
+agy
+```
+
+The first run walks you through Google sign-in. See the
+[Antigravity CLI guide](https://antigravity.google/docs/cli/getting-started).
+
+### Claude Code
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+claude
+```
+
+The first run asks you to sign in. See Anthropic's
+[Claude Code installation guide](https://support.claude.com/en/articles/14552382-your-first-day-in-claude-code).
+
+After installing a CLI, restart Vedium so it sees the updated `PATH`. Then open
+**Settings -> Model**, choose **AI CLI**, enable *Use installed AI CLIs as
+models*, select a detected model, and click **Save & Load Model**.
+
+### Free-tier status (checked 2026-08-08)
+
+- **Codex:** yes. ChatGPT Free includes limited Codex usage, including the CLI.
+  Signing in with an API key is separate and billed at API rates. See
+  [Codex pricing](https://learn.chatgpt.com/docs/pricing).
+- **Antigravity:** yes. Google's Individual plan is $0/month and includes the
+  CLI with basic weekly limits. See
+  [Antigravity pricing](https://antigravity.google/pricing).
+- **Claude Code:** no free CLI tier. Claude has a free chat plan, but Claude
+  Code is included only in paid Claude plans; API and third-party-provider use
+  may be billed separately. See [Claude pricing](https://claude.com/pricing).
+
+Plans and limits change, so treat this dated snapshot as a quick guide and
+check the linked provider pages before signing up.
+
 ## Choosing a model (local backend)
 
 The installer offers two tested recommendations:
@@ -96,7 +150,9 @@ exactly what it does:
 - **Vedium uses a global keyboard listener** (via `pynput`) to keep a short
   buffer of your recent keystrokes. That is what lets it correct the text
   you just typed. The buffer lives in memory only; it is never written to
-  disk and never leaves your machine on its own.
+  disk and never leaves your machine on its own. It is erased before Vedium
+  accepts typing from a different foreground window and immediately when you
+  disable Vedium from the tray.
 - **Local model backend:** nothing is ever sent anywhere. The model runs on
   your machine and works with the internet unplugged.
 - **Cloud API backend:** the text being corrected (and only that text) is

@@ -21,6 +21,8 @@ _OS_RESERVED_HOTKEY_REASONS = {
     "f10": "F10 activates the Windows menu bar, which drops your text selection before it can be copied.",
 }
 
+DEFAULT_TRIGGER_CHARS = ".!?,"
+
 # _HERE points to the refactored directory (where the launcher is)
 _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_FILE = os.path.join(_HERE, "vedium_config.json")
@@ -52,8 +54,12 @@ DEFAULT_CFG = {
     "prompt_format":          "Auto  (detect from model)",
     "gpu_acceleration":       "Auto",
     "working_language":       "Auto",
-    "trigger_chars":          ".!?",
-    "spell_check_mode":       "Toast",
+    "trigger_chars":          DEFAULT_TRIGGER_CHARS,
+    # Spell-check is opt-in on a fresh install. The assistant hotkeys remain
+    # available, while background sentence capture/correction stays dormant
+    # until the user explicitly chooses Auto or Toast in Settings.
+    "spell_check_mode":       "Off",
+    "toast_accept_hotkey":    "ctrl+enter",
     "enabled":                True,
     "min_word_count":         2,
     "max_wait_sec":           12,
@@ -211,10 +217,10 @@ WORKING_LANGUAGE_OPTIONS = [
     "Ukrainian",
 ]
 
-# Working languages a user is assumed to be TYPING in rather than translating
-# into, so spell-check corrects the text instead of translating it. BHS is
-# unconditional because its users routinely type without diacritics, which the
-# language detector cannot reliably distinguish on one short sentence.
+# Working languages whose ambiguous short input is assumed to be native typing
+# rather than foreign text. BHS users routinely type without diacritics, which
+# the language detector cannot reliably identify from one short sentence. Clear
+# evidence of another language still triggers translation into BHS.
 # Any other named language qualifies dynamically — see language.is_same_language.
 #
 # Formerly _SLAVIC_LANGS, which described the members rather than the purpose

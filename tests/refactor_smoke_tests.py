@@ -63,6 +63,18 @@ def test_project_sources_have_licensing_notices() -> None:
     assert "Signed-off-by" in contributing
 
 
+def test_privacy_buffer_boundaries_are_wired() -> None:
+    daemon_source = (PACKAGE / "daemon.py").read_text(encoding="utf-8")
+    buffer_source = (PACKAGE / "buffer.py").read_text(encoding="utf-8")
+    assert "def clear(self) -> int:" in buffer_source
+    assert "def trigger_with_epoch" in buffer_source
+    assert "expected_epoch=context_epoch" in daemon_source
+    assert "self._sync_foreground_typing_context()" in daemon_source
+    assert "self._start_foreground_watcher()" in daemon_source
+    assert "self.buf.clear()" in daemon_source
+    assert "Typing buffer cleared because the foreground window changed" in daemon_source
+
+
 def test_installer_reuses_compatible_private_runtime_on_reinstall() -> None:
     installer = (ROOT / "Vedium.iss").read_text(encoding="utf-8")
     install_delete = installer.split("[InstallDelete]", 1)[1].split("[Icons]", 1)[0]
@@ -254,9 +266,9 @@ def test_assistant_hotkeys_route_by_explicit_action() -> None:
         def is_busy_or_pending(self):
             return False
 
-        def trigger_rephrase(self, _min_words):
+        def trigger_rephrase_with_epoch(self, _min_words):
             self.trigger_calls += 1
-            return self.buffered
+            return (*self.buffered, 0) if self.buffered else None
 
     selection = ["A selected passage"]
     notices = []
@@ -538,6 +550,7 @@ def main() -> int:
     tests = [
         test_no_launcher_uses_old_monolith,
         test_project_sources_have_licensing_notices,
+        test_privacy_buffer_boundaries_are_wired,
         test_installer_reuses_compatible_private_runtime_on_reinstall,
         test_standalone_chat_imports_and_symbols_exist,
         test_settings_split_globals_are_wired_to_modules,

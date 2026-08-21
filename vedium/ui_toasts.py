@@ -18,7 +18,13 @@ from .config import (
     resolve_prompt_format,
     save_cfg,
 )
-from .llm import _stream_cancel, chat_with_text_stream, _streaming_answer, _clean_llm_output
+from .llm import (
+    _stream_cancel,
+    chat_with_text_stream,
+    reading_followup_stream,
+    _streaming_answer,
+    _clean_llm_output,
+)
 from .cli_models import CLIModelError
 from .reflections import (
     append_reflection,
@@ -33,6 +39,7 @@ from .reflections import (
 # at import time and every toast would silently fall back to Tk's default root.
 from . import ui_thread
 from .ui_thread import _ui_call
+from .hotkeys import toast_accept_hotkey_display, toast_accept_hotkey_tk_sequence
 
 def _apply_windows_decorations(win):
     """Apply modern visual decorations to top-level windows on Windows (10/11).
@@ -533,11 +540,9 @@ class _Toast:
         root.geometry(f"{w}x{h}+{sw - w - 20}+{sh - h - 32}")
         _apply_windows_decorations(root)
         
-        root.focus_force()   # grab focus on appearance so keyboard shortcuts work immediately
-        # Electron apps (Obsidian, Chrome) can hold focus momentarily; retry after
-        # a short delay so the window is ready to receive keyboard events even if
-        # the initial focus_force() is overridden by the host application.
-        root.after(150, root.focus_force)
+        # Automatic spell-check is advisory: keep keyboard focus in the app the
+        # user is typing in. The global listener handles the replacement shortcut,
+        # while clicking the toast still activates its optional controls.
 
         # Top accent stripe
         tk.Frame(root, bg=ACCENT, height=3).pack(fill="x")
@@ -657,6 +662,12 @@ class _Toast:
                   font=FONT_B, bg=SURF2, fg=MUTED,
                   relief="flat", padx=10, pady=3, cursor="hand2",
                   command=lambda: close_with(self._on_ignore)).pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            btn_row,
+            text=f"{toast_accept_hotkey_display((self._cfg or {}).get('toast_accept_hotkey'))} to replace",
+            font=("Segoe UI", 8), bg=SURFACE, fg=MUTED,
+        ).pack(side="left", padx=(10, 0))
 
         # ── Chat row ──────────────────────────────────────────────────────────
         tk.Frame(body, bg=SURF2, height=1).pack(fill="x", pady=(8, 6))
@@ -822,9 +833,13 @@ class _Toast:
         root.bind("<Enter>", _on_toast_enter, add="+")
         root.bind("<Leave>", _on_toast_leave, add="+")
 
-        # Keyboard shortcuts matching _EditableToast so power users never need
-        # the mouse: Ctrl+Return to accept the suggestion, Escape to ignore.
-        root.bind("<Control-Return>", lambda _e: close_with(accept_current))
+        # Also bind locally for users who clicked into the toast's chat field.
+        root.bind(
+            toast_accept_hotkey_tk_sequence(
+                (self._cfg or {}).get("toast_accept_hotkey")
+            ),
+            lambda _e: close_with(accept_current),
+        )
         root.bind("<Escape>",         lambda _e: close_with(self._on_ignore))
 
 
@@ -1188,6 +1203,11 @@ class _EditableToast:
         # Entirely in-memory — cleared automatically when the toast closes.
         _et_history  = [self._corrected]
         _et_hist_idx = [0]
+        # Parallel conversation state for reading answer cards. Each slot
+        # contains the follow-up turns that led to the matching answer above.
+        # Going back and asking something new therefore creates a clean branch.
+        _et_followup_turns = [[]]
+        _et_initial_answer = [None]
 
         chat_row = tk.Frame(body, bg=SURFACE)
         chat_row.pack(fill="x", pady=(0, 2))
@@ -1263,17 +1283,19 @@ class _EditableToast:
                 _stream_cancel.clear()
                 # Snapshot the current editor text to use as the base
                 current_text = [None]
+                prior_turns = [[]]
+                initial_answer = [None]
                 def _snap():
                     current_text[0] = txt.get("1.0", "end-1c") if self._txt is not None else ""
+                    if self._answer_only:
+                        if _et_initial_answer[0] is None:
+                            _et_initial_answer[0] = current_text[0] or self._corrected
+                        initial_answer[0] = _et_initial_answer[0]
+                        prior_turns[0] = [
+                            dict(turn) for turn in _et_followup_turns[_et_hist_idx[0]]
+                        ]
                 _ui_call(_snap, wait=True)
                 base = current_text[0] or ""
-                # Answer cards: follow-up questions are about the ORIGINAL
-                # passage the reader selected, not about the answer shown in
-                # the editor ("give an example", "explain the second part").
-                # `base` still holds the editor snapshot for history purposes.
-                llm_base = (self._original
-                            if (self._answer_only and self._original)
-                            else base)
 
                 # Disable Replace while the AI is working to prevent mid-stream accepts.
                 def _lock_ui():
@@ -1292,9 +1314,23 @@ class _EditableToast:
                 try:
                     chunks = []
                     last_render = [None]
-                    for piece in chat_with_text_stream(
-                            llm_base, instruction, self._fmt, cfg=self._cfg,
-                            on_fallback=self.show_model_switch):
+                    if self._answer_only:
+                        stream = reading_followup_stream(
+                            self._original,
+                            initial_answer[0] or base,
+                            prior_turns[0],
+                            instruction,
+                            self._fmt,
+                            mode=self._label,
+                            cfg=self._cfg,
+                            on_fallback=self.show_model_switch,
+                        )
+                    else:
+                        stream = chat_with_text_stream(
+                            base, instruction, self._fmt, cfg=self._cfg,
+                            on_fallback=self.show_model_switch,
+                        )
+                    for piece in stream:
                         chunks.append(piece)
                         # Hide chain-of-thought while streaming: show "Thinking…"
                         # until the answer emerges, then render the answer-so-far.
@@ -1321,10 +1357,18 @@ class _EditableToast:
                         # still hold the original placeholder ("Generating suggestion…")
                         # from before the rephrase pipeline finished streaming — the
                         # widget was updated live but _et_history[0] was never patched.
-                        _et_history[_et_hist_idx[0]] = b
+                        current_idx = _et_hist_idx[0]
+                        _et_history[current_idx] = b
                         # Discard any forward history beyond current position, then push.
-                        del _et_history[_et_hist_idx[0] + 1:]
+                        del _et_history[current_idx + 1:]
                         _et_history.append(r)
+                        if self._answer_only:
+                            del _et_followup_turns[current_idx + 1:]
+                            _et_followup_turns.append([
+                                *prior_turns[0],
+                                {"role": "user", "content": instruction},
+                                {"role": "assistant", "content": r},
+                            ])
                         _et_hist_idx[0] = len(_et_history) - 1
                         if self._txt is not None:
                             self._txt.delete("1.0", "end")
@@ -1381,10 +1425,14 @@ class _EditableToast:
         chat_entry.bind("<Return>", _send_chat)
 
         root.protocol("WM_DELETE_WINDOW", ignore)
-        # Ctrl+Enter: Replace on a rewrite toast, Copy on an answer card
-        # (accept() is a guarded no-op there — nothing to replace).
-        root.bind("<Control-Return>",
-                  lambda _e: (_do_copy() if self._answer_only else accept()))
+        # Configurable primary action: Replace on a rewrite toast, Copy on an
+        # answer card (accept() is a guarded no-op there).
+        root.bind(
+            toast_accept_hotkey_tk_sequence(
+                (self._cfg or {}).get("toast_accept_hotkey")
+            ),
+            lambda _e: (_do_copy() if self._answer_only else accept()),
+        )
         root.bind("<Escape>", lambda _e: ignore())
 
         # Auto-close after 60 s so the background LLM thread is never blocked forever.

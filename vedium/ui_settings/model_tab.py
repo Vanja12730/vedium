@@ -530,15 +530,6 @@ def _build_model_tab(ui):
     )
     cli_status_var = tk.StringVar(master=win, value="")
 
-    # Detection is synchronous here because the Setup tab binds cli_model_ids
-    # while this tab is being built. Listing Antigravity's models costs one
-    # ~2.5s `agy models` call, cached for the rest of the run; Refresh below
-    # re-runs it off the UI thread.
-    try:
-        cli_detection = detect_clis()
-    except Exception as exc:
-        diagnostics.record("backend", "error", "AI CLI detection failed.", str(exc))
-        cli_detection = _empty_cli_detection()
     # Shared with the Setup tab, which binds this list once at build time, so
     # Refresh must mutate it in place rather than rebind it.
     cli_model_ids: list[str] = []
@@ -595,6 +586,10 @@ def _build_model_tab(ui):
                 cli_enabled_var.set(False)
             else:
                 diagnostics.record("config", "info", "AI CLI models enabled with consent.")
+                # Discovery can launch installed console applications (notably
+                # ``agy models``).  Do it only after the user opts into this
+                # backend, never merely because Settings was opened.
+                _refresh_cli_models()
         _refresh_cli_controls()
 
     cli_main_toggle = _make_toggle(
@@ -710,7 +705,17 @@ def _build_model_tab(ui):
         threading.Thread(target=_do, daemon=True).start()
 
     cli_refresh_btn.config(command=_refresh_cli_models)
-    _apply_cli_detection(cli_detection)
+    if cli_enabled_var.get():
+        # Existing CLI users still get automatic discovery, but only after the
+        # graphical window has finished building and never on the UI thread.
+        win.after(0, _refresh_cli_models)
+    else:
+        for key, title in _CLI_TITLES:
+            cli_found_lbls[key].config(
+                text=f"{title}: not checked - command-line models are off",
+                fg=MUTED,
+            )
+        _refresh_cli_controls()
 
     def _on_backend_switch():
         for f in (local_frame, server_frame, cloud_frame, cli_frame):

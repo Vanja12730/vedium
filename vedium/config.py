@@ -10,6 +10,7 @@ import sys
 from . import constants as c
 from . import diagnostics
 from . import gguf
+from .hotkeys import normalize_toast_accept_hotkey
 
 
 # ── prompt-format detection ───────────────────────────────────────────────────
@@ -414,10 +415,20 @@ def load_cfg() -> dict:
         if cfg.get("spell_check_mode") not in ("Auto", "Toast", "Off"):
             diagnostics.record(
                 "config", "warning",
-                "Invalid spell-check mode in config; restored Toast mode.",
+                "Invalid spell-check mode in config; restored Off mode.",
                 str(cfg.get("spell_check_mode")),
             )
-            cfg["spell_check_mode"] = "Toast"
+            cfg["spell_check_mode"] = "Off"
+        configured_toast_hotkey = cfg.get("toast_accept_hotkey")
+        cfg["toast_accept_hotkey"] = normalize_toast_accept_hotkey(
+            configured_toast_hotkey
+        )
+        if configured_toast_hotkey != cfg["toast_accept_hotkey"]:
+            diagnostics.record(
+                "config", "warning",
+                "Invalid toast shortcut in config; restored Ctrl+Enter.",
+                str(configured_toast_hotkey),
+            )
         if cfg.get("backend_mode") not in ("local", "server", "cloud", "cli"):
             diagnostics.record(
                 "config", "warning",

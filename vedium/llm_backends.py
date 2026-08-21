@@ -1033,7 +1033,8 @@ def _stream_prompt(prompt: str, *, max_tokens: int, temperature: float,
         return
     if isinstance(client, _CloudClient):
         yield from _cloud_stream_with_fallback(
-            _prompt_to_messages(prompt), max_tokens=max_tokens,
+            messages if messages is not None else _prompt_to_messages(prompt),
+            max_tokens=max_tokens,
             temperature=temperature, stop=stop, cfg=cfg,
             on_fallback=on_fallback,
         )

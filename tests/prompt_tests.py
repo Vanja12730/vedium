@@ -198,6 +198,84 @@ def test_answer_modes_use_a_gentler_repeat_penalty() -> None:
     assert generation_calls[1]["repeat_penalty"] == 1.3
 
 
+def test_reading_followup_is_grounded_complete_and_multiturn() -> None:
+    """Reading-card follow-ups must retain their source, initial answer, and
+    earlier turns while explicitly preventing bare yes/no and invented detail."""
+    captured: list[tuple[str, dict]] = []
+    source = (
+        "Hegel says a philosophical preface seems superfluous, inappropriate, "
+        "and counterproductive in light of the nature of the subject matter."
+    )
+    initial = "Hegel questions whether an ordinary preface belongs in philosophy."
+    prior = [
+        {"role": "user", "content": "What is his first objection?"},
+        {"role": "assistant", "content": "He says it seems superfluous."},
+    ]
+    question = "Does he explain which feature makes it counterproductive?"
+
+    with _fake_backend([]) as llm:
+        def capture_stream(prompt, **kwargs):
+            captured.append((prompt, kwargs))
+            yield {"choices": [{"text": "No. The source leaves that unstated."}]}
+
+        llm._stream_prompt = capture_stream
+        llm._stream_cancel.clear()
+        result = "".join(llm.reading_followup_stream(
+            source, initial, prior, question, "Gemma  (Google)",
+            mode="Explain It (Simply)", cfg={"backend_mode": "local"},
+        ))
+
+    assert result.startswith("No.")
+    assert len(captured) == 1
+    prompt, kwargs = captured[0]
+    messages = kwargs["messages"]
+    assert [message["role"] for message in messages] == [
+        "system", "user", "assistant", "user", "assistant", "user",
+    ]
+    system = messages[0]["content"]
+    for fence in (
+        "never as evidence about the source",
+        "Do not invent missing reasons",
+        "what it says and what it does not explain",
+        "Preserve every negation",
+        "always add a brief explanation",
+    ):
+        assert fence in system
+    assert source in messages[1]["content"]
+    assert "Explain It (Simply)" in messages[1]["content"]
+    assert messages[2]["content"] == initial
+    assert messages[3:5] == prior
+    assert messages[-1]["content"] == question
+    assert source in prompt and initial in prompt and question in prompt
+    assert kwargs["temperature"] == 0.25
+    assert kwargs["repeat_penalty"] == 1.1
+
+
+def test_every_reading_mode_uses_the_same_followup_contract() -> None:
+    """The grounded continuation helper must accept every answer-card mode;
+    mode identity is retained as context rather than replacing the shared rules."""
+    import vedium.constants as c
+
+    seen = set()
+    with _fake_backend([]) as llm:
+        def capture_stream(_prompt, **kwargs):
+            mode_line = next(
+                line for line in kwargs["messages"][1]["content"].splitlines()
+                if line.startswith("The reading mode was ")
+            )
+            seen.add(mode_line.removeprefix("The reading mode was ")
+                     .removesuffix(". Provide the initial reading answer."))
+            yield {"choices": [{"text": "A complete answer."}]}
+
+        llm._stream_prompt = capture_stream
+        for mode in c.ANSWER_MODES:
+            llm._stream_cancel.clear()
+            list(llm.reading_followup_stream(
+                "Source", "Initial answer", [], "Follow up", "Plain", mode=mode,
+            ))
+    assert seen == set(c.ANSWER_MODES)
+
+
 def test_extract_writing_style_is_a_selected_text_answer_mode() -> None:
     """Style extraction analyses a selection and returns the name/profile contract."""
     import vedium.constants as c
@@ -429,7 +507,8 @@ def test_spell_check_corrects_rather_than_translating_its_own_language() -> None
     assert is_same_language(german, "German") is True      # correct, don't translate
     assert is_same_language(english, "German") is False    # translate, as configured
     assert is_same_language(english, "Auto") is True
-    assert is_same_language(english, "BHS") is True        # always native
+    assert is_same_language(english, "BHS") is False       # clear foreign text translates
+    assert is_same_language("cesce idem u skolu", "BHS") is True  # ambiguous native typing
     # Detection failure must keep the old translate-first behaviour, or
     # translate-as-you-type silently stops working on short sentences.
     assert is_same_language("kratko", "German") is False
@@ -479,6 +558,71 @@ def test_spell_check_corrects_rather_than_translating_its_own_language() -> None
     assert _restore_common_bhs("cesce") == "češće"
     assert _restore_common_bhs("Ćešce") == "Češće"
     assert _restore_common_bhs("najcesce") == "najčešće"
+
+
+def test_every_named_working_language_translates_foreign_spell_check_input() -> None:
+    """Auto and Toast share this call, so every named target must select the
+    translation prompt when the source is positively foreign."""
+    import vedium.constants as c
+
+    english_source = "The weather is beautiful today and the children are outside"
+    german_source = "Das Wetter ist heute sehr schön und die Kinder sind draußen"
+
+    captured: list = []
+    with _fake_backend(captured) as llm:
+        for target in c.WORKING_LANGUAGE_OPTIONS:
+            if target == "Auto":
+                continue
+            source = german_source if target == "English" else english_source
+            llm.spell_check_sentence(
+                source, "Plain  (no template)", working_language=target,
+            )
+            _fmt, system, user = captured[-1]
+            assert "professional translator and grammar corrector" in system, target
+            assert f"Always output in natural, fluent {target}" in system, target
+            assert f"Translate naturally into {target}" in user, target
+
+
+def test_toast_allows_low_similarity_translation_but_not_correction() -> None:
+    """A translated Toast suggestion must remain reviewable even when source
+    and target have almost no character overlap."""
+    from vedium.daemon import _should_hide_toast_suggestion
+
+    source = "The weather is beautiful today"
+    translated = "Vrijeme je danas prekrasno"
+    hallucination = "Unrelated model response"
+
+    assert not _should_hide_toast_suggestion(
+        source, translated, is_translation=True,
+    )
+    assert _should_hide_toast_suggestion(
+        source, hallucination, is_translation=False,
+    )
+
+
+def test_fresh_install_spell_check_defaults_off() -> None:
+    """Fresh installs are opt-in; saved Toast and Auto choices remain valid."""
+    import json
+    from pathlib import Path
+    import tempfile
+    import vedium.constants as c
+    from vedium.config import load_cfg
+
+    assert c.DEFAULT_CFG["spell_check_mode"] == "Off"
+
+    old_config, old_legacy = c.CONFIG_FILE, c.LEGACY_CONFIG_FILE
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "vedium_config.json"
+            c.CONFIG_FILE = str(config_path)
+            c.LEGACY_CONFIG_FILE = str(Path(tmp) / "legacy.json")
+            for saved_mode in ("Toast", "Auto", "Off"):
+                config_path.write_text(
+                    json.dumps({"spell_check_mode": saved_mode}), encoding="utf-8",
+                )
+                assert load_cfg()["spell_check_mode"] == saved_mode
+    finally:
+        c.CONFIG_FILE, c.LEGACY_CONFIG_FILE = old_config, old_legacy
 
 
 def test_only_wrapping_quotes_are_stripped_from_answers() -> None:
@@ -794,11 +938,16 @@ def main() -> int:
         test_light_writing_modes_have_guardrails,
         test_explain_it_is_source_bounded,
         test_answer_modes_use_a_gentler_repeat_penalty,
+        test_reading_followup_is_grounded_complete_and_multiturn,
+        test_every_reading_mode_uses_the_same_followup_contract,
         test_extract_writing_style_is_a_selected_text_answer_mode,
         test_generated_style_can_be_edited_and_saved_as_a_writing_mode,
         test_answer_modes_honour_the_working_language_setting,
         test_auto_answers_name_the_detected_language,
         test_spell_check_corrects_rather_than_translating_its_own_language,
+        test_every_named_working_language_translates_foreign_spell_check_input,
+        test_toast_allows_low_similarity_translation_but_not_correction,
+        test_fresh_install_spell_check_defaults_off,
         test_only_wrapping_quotes_are_stripped_from_answers,
         test_cloud_hidden_reasoning_retry_nonstream,
         test_cloud_hidden_reasoning_retry_stream,
