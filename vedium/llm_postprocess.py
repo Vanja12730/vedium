@@ -314,9 +314,12 @@ def _get_thinking_budget(cfg: dict | None = None) -> int:
     # Current llama-server applies enable_thinking=false through the model's
     # native chat template. Reserving thousands of hidden-reasoning tokens in
     # that case only crowds the visible answer out of small context windows.
+    # Skipped for always-thinking models (LFM2): their template ignores the
+    # enable_thinking kwarg, so the budget is genuinely needed every call.
     if (
         _backend.server_disable_thinking
         and getattr(_backend.client, "supports_chat_template_kwargs", False)
+        and not getattr(_backend, "always_thinking", False)
     ):
         return 0
     return _THINKING_BUDGET_AUTO if _backend.reasoning_detected else 0

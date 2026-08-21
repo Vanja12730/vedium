@@ -64,6 +64,12 @@ class _LlamaServerClient:
         # model spends the whole (small) spell-check token budget on hidden
         # reasoning and never emits an answer — so no correction appears.
         self._think_disable_suffix = ""
+        # LFM2-style models whose template exposes only a `preserve_thinking`
+        # toggle (controls whether PRIOR thoughts stay in context) but has no
+        # way to stop the current turn from thinking. Standard toggles are
+        # ineffective, so we must always budget for thinking and fall back to
+        # `reasoning_content` when `content` comes back empty. Set by _probe().
+        self.always_thinking = False
         self._probe()
 
     # ── context_params shim (used by _calc_rephrase_max_tokens) ──────────────
@@ -86,6 +92,8 @@ class _LlamaServerClient:
         # A newly selected model must not inherit the previous model's flag if
         # /props fails or exposes a non-reasoning template.
         _backend.reasoning_detected = False
+        _backend.always_thinking = False
+        self.always_thinking = False
         try:
             resp = urllib.request.urlopen(f"{self.base_url}/props", timeout=5)
             data = _json.loads(resp.read())
@@ -118,7 +126,19 @@ class _LlamaServerClient:
                 # chat requests pass enable_thinking=false through the embedded
                 # template, so disabled mode does not waste output capacity.
                 _backend.reasoning_detected = True
-                if _backend.server_disable_thinking:
+                # LFM2 signature: template variable is `preserve_thinking`
+                # (governs prior turns' visibility only) with no branch that
+                # blocks the current turn from thinking. Detection lets the
+                # rest of the pipeline always budget for thinking and read
+                # reasoning_content when content comes back empty.
+                if "preserve_thinking" in template_str:
+                    self.always_thinking = True
+                    _backend.always_thinking = True
+                    print("[Vedium] Always-thinking model detected (LFM2-style: "
+                          "no template-side way to disable thinking); reserving "
+                          "thinking budget and enabling reasoning_content fallback.",
+                          flush=True)
+                elif _backend.server_disable_thinking:
                     print("[Vedium] Reasoning model detected — thinking disabled by "
                           "the native chat template.", flush=True)
                 else:
@@ -239,9 +259,15 @@ class _LlamaServerClient:
             ) from exc
         choices = result.get("choices") or []
         message = choices[0].get("message", {}) if choices else {}
+        text = message.get("content") or ""
+        # Always-thinking models (LFM2) may run out of budget still inside their
+        # <think> block, leaving content empty. Surface the reasoning trace so
+        # the reader gets the model's actual output instead of a blank card.
+        if not text.strip() and self.always_thinking:
+            text = message.get("reasoning_content") or ""
         return {
             "choices": [{
-                "text": message.get("content") or "",
+                "text": text,
                 "finish_reason": choices[0].get("finish_reason") if choices else None,
             }]
         }
@@ -274,6 +300,11 @@ class _LlamaServerClient:
 
     def _iter_chat_stream(self, req):
         response = urllib.request.urlopen(req, timeout=120)
+        emitted_any = False
+        # For always_thinking models, buffer reasoning_content so we can emit
+        # it as one final chunk if the stream ends without any visible content.
+        # For every other model this stays empty and costs one bool comparison.
+        reasoning_buf: list[str] = []
         try:
             for raw_line in response:
                 line = raw_line.decode("utf-8", errors="replace").strip()
@@ -292,9 +323,16 @@ class _LlamaServerClient:
                 delta = choices[0].get("delta") or {}
                 text = delta.get("content") or ""
                 if text:
+                    emitted_any = True
                     yield {"choices": [{"text": text}]}
+                elif self.always_thinking:
+                    piece = delta.get("reasoning_content") or ""
+                    if piece:
+                        reasoning_buf.append(piece)
                 if choices[0].get("finish_reason"):
                     break
+            if not emitted_any and reasoning_buf:
+                yield {"choices": [{"text": "".join(reasoning_buf)}]}
         finally:
             response.close()
 

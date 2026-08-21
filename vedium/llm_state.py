@@ -25,7 +25,10 @@ class _ActiveBackend:
     ``reasoning_detected`` flips True the first time the connected model
     emits reasoning markers (resets on connect).  ``server_disable_thinking``
     mirrors the "disable thinking" setting; config.load_cfg and the Settings
-    bottom bar apply it live.
+    bottom bar apply it live.  ``always_thinking`` flips True for LFM2-style
+    models whose template cannot be forced out of thinking mode; the client
+    probe sets it and the pipeline uses it to keep the thinking budget
+    reserved and to read reasoning_content when content comes back empty.
     """
 
     def __init__(self):
@@ -35,6 +38,7 @@ class _ActiveBackend:
         self.label = "None"
         self.reasoning_detected = False
         self.server_disable_thinking = True
+        self.always_thinking = False
 
 
 _backend = _ActiveBackend()
