@@ -21,14 +21,44 @@ model, or use a cloud API / CLI agent you already have.
 
 ## Install
 
-### Option 1 — Installer (recommended)
+Two ways in. If you already have Python, **installing from source is two
+commands and Windows raises no SmartScreen warning**. If you would rather not
+deal with Python at all, the installer bundles everything for you — but
+Windows will warn you about it once, because it is not code-signed.
+
+### Option 1 — From source (no SmartScreen warning)
+
+Requires Python 3.10+ from [python.org](https://www.python.org/downloads/)
+(3.12 recommended; tkinter is included in the python.org installer).
+
+```
+git clone https://github.com/Vanja12730/vedium.git
+cd vedium
+py -3.12 -m pip install -r requirements.txt
+py -3.12 -m vedium
+```
+
+Or double-click `run.vbs` to start it without a console window.
+
+Nothing here trips SmartScreen: you are running your own checkout with your
+own Python, so there is no unrecognised downloaded executable for Windows to
+quarantine.
+
+To use a **local model** from a source checkout, put a current
+`llama-server.exe` distribution in `llama-server\cuda` or
+`llama-server\cpu`, or set the `VEDIUM_LLAMA_SERVER` environment variable to
+its full path. See [GPU_INSTALL_GUIDE.md](GPU_INSTALL_GUIDE.md). Cloud API and
+CLI backends need nothing extra.
+
+### Option 2 — Installer (no Python needed)
 
 1. Download `VediumSetup_v*.exe` from the
    [latest release](../../releases/latest).
 2. Run it. **Windows SmartScreen will warn you** ("Windows protected your
    PC") because the installer is not code-signed — click **More info →
    Run anyway**. The installer is built from exactly the code in this
-   repository; you can audit it or build it yourself (see below).
+   repository; you can audit it or build it yourself (see below), or use
+   Option 1 above and avoid the warning entirely.
 3. Follow the wizard. It will:
    - install Vedium with its own **private Python** — it never touches or
      even looks at any Python you may have installed;
@@ -39,7 +69,8 @@ model, or use a cloud API / CLI agent you already have.
    appears — right-click it to open Settings.
 
 No Python, no pip, no PATH changes — the install is fully self-contained,
-and uninstalling from *Add/Remove Programs* removes everything.
+and uninstalling from *Add/Remove Programs* removes everything. It installs
+into your user profile, so there is no administrator prompt.
 
 Reinstalling or upgrading into the same directory is incremental: Vedium
 preserves a compatible private Python environment, reuses an already-working
@@ -47,26 +78,6 @@ versioned local engine, keeps the existing model/backend configuration, and
 caches downloaded engine archives. A new engine is fetched only when its pinned
 llama.cpp build changes; a clean Python replacement happens only when the
 installer declares an incompatible private-runtime version.
-
-### Option 2 — From source
-
-Requires Python 3.10+ from [python.org](https://www.python.org/downloads/)
-(3.12 recommended; tkinter is included in the python.org installer).
-
-```
-git clone <this-repo-url>
-cd vedium
-py -3.12 -m pip install -r requirements.txt
-py -3.12 -m vedium
-```
-
-Or double-click `run.vbs` to start it without a console window.
-
-To use a **local model** from a source checkout, put a current
-`llama-server.exe` distribution in `llama-server\cuda` or
-`llama-server\cpu`, or set the `VEDIUM_LLAMA_SERVER` environment variable to
-its full path. See [GPU_INSTALL_GUIDE.md](GPU_INSTALL_GUIDE.md). Cloud API and
-CLI backends need nothing extra.
 
 ## Optional CLI backends
 

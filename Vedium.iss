@@ -37,6 +37,9 @@
 #define AppName      "Vedium"
 #define AppVersion   "1.3"
 #define AppPublisher "The Ved Project"
+; Single source of truth for the project URLs; update here if the repo moves
+; (e.g. transferred to the ved-project org) and both Setup fields follow.
+#define AppUrl       "https://github.com/Vanja12730/vedium"
 #define AppExeName   "run.vbs"
 ; Bump this only when the portable Python/runtime dependency bundle changes in
 ; an incompatible way. Code-only Vedium updates should leave it unchanged so
@@ -50,9 +53,9 @@
 AppId={{0AB6BC53-F06E-4176-8D02-A14FB363A564}
 AppName={#AppName}
 AppVersion={#AppVersion}
-; Point these at the repo once it lives under the ved-project GitHub org
-AppPublisherURL=
-AppSupportURL=
+; Shown in the SmartScreen "More info" pane and in Add/Remove Programs.
+AppPublisherURL={#AppUrl}
+AppSupportURL={#AppUrl}/issues
 AppPublisher={#AppPublisher}
 DefaultDirName={localappdata}\{#AppName}
 DisableProgramGroupPage=yes
