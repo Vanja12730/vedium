@@ -137,6 +137,49 @@ def _join_completed_sentence(corrected: str, punct: str, post: str) -> str:
     return corrected + punct + post
 
 
+def _collapse_selection_to_end():
+    """Drop a Shift+Left selection, leaving the caret where it started."""
+    _kbctrl.press(Key.right)
+    _kbctrl.release(Key.right)
+
+
+def _ensure_selection_matches(expected: str):
+    """
+    Refuse to paste unless the selection really holds the text Vedium means to
+    overwrite.
+
+    The selection length is derived from the keystrokes the daemon observed, so
+    it goes silently wrong whenever the host application edits the document on
+    its own -- Windows 11 Notepad turning "doesnt" into "doesn't", or an editor
+    swapping straight quotes for curly ones. The span then covers the wrong
+    characters and pasting corrupts the surrounding text, so check first.
+
+    Whitespace is ignored: whitespace inside the span cannot be reconstructed
+    from the caller's arguments, and it is never what a host autocorrect
+    rewrites.
+
+    A selection that cannot be read back at all is treated as safe, so apps
+    that refuse Ctrl+C keep behaving exactly as they did before.
+    """
+    selected, _previous_clipboard = _copy_selected_text()
+    if selected is None:
+        diagnostics.record(
+            "replacement", "info",
+            "Selection could not be read back; replacing without verification.",
+        )
+        return
+    if "".join(selected.split()) == "".join(expected.split()):
+        return
+    _collapse_selection_to_end()
+    diagnostics.record(
+        "replacement", "warning",
+        "Replacement blocked because the text changed after Vedium read it.",
+        "The application edited the line itself (autocorrect or smart quotes). "
+        "Use Copy if you want to paste the suggestion manually.",
+    )
+    raise RuntimeError("Document changed under the selection; refusing to paste.")
+
+
 def _do_replace(original: str, corrected: str, punct: str, post: str, raw_len: int,
                 leading_ws: str = "",
                 from_toast: bool = False,
@@ -174,6 +217,7 @@ def _do_replace(original: str, corrected: str, punct: str, post: str, raw_len: i
             _kbctrl.release(Key.left)
 
     time.sleep(0.02)
+    _ensure_selection_matches(original + punct + post)
     prev_clip = _clipboard_get_text()
     try:
         _clipboard_set_text(full_new)
@@ -198,7 +242,8 @@ def _join_rephrase_text(corrected: str, post: str) -> str:
 
 def _do_replace_rephrase(original: str, corrected: str, post: str, raw_len: int,
                           from_toast: bool = True,
-                          expected_window: int | None = None):
+                          expected_window: int | None = None,
+                          expected_original: str | None = None):
     """
     Select (raw_len + len(post)) characters backwards and overwrite with the
     rephrased version.
@@ -227,6 +272,11 @@ def _do_replace_rephrase(original: str, corrected: str, post: str, raw_len: int,
             _kbctrl.release(Key.left)
 
     time.sleep(0.02)
+    # expected_original is the text as the user typed it; `original` may have had
+    # an inline mode trigger stripped, which the document still holds.
+    _ensure_selection_matches(
+        (original if expected_original is None else expected_original) + post
+    )
     prev_clip = _clipboard_get_text()
     try:
         _clipboard_set_text(full_new)

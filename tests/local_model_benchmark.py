@@ -34,8 +34,14 @@ from vedium.llm import (  # noqa: E402
 from vedium.llm_postprocess import _clean_llm_output, _strip_reasoning  # noqa: E402
 
 
-DEFAULT_SERVER = Path(r"D:\LLM\llama-b9888-bin-win-cuda-13.3-x64\llama-server.exe")
-MODEL_ROOT = Path(r"D:\LLM\models")
+# Developer-machine defaults. Override with the same VEDIUM_LLAMA_SERVER the app
+# honours, plus VEDIUM_MODEL_ROOT, to run this benchmark against your own
+# llama-server build and GGUF library without editing the file.
+DEFAULT_SERVER = Path(os.environ.get(
+    "VEDIUM_LLAMA_SERVER",
+    r"D:\LLM\llama-b9888-bin-win-cuda-13.3-x64\llama-server.exe",
+))
+MODEL_ROOT = Path(os.environ.get("VEDIUM_MODEL_ROOT", r"D:\LLM\models"))
 OUT_DIR = ROOT / "Output" / "local_model_benchmark"
 
 

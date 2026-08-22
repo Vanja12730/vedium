@@ -613,6 +613,7 @@ class SpellDaemon:
                     mode_override=resolved_mode,
                     target_window=target_window,
                     context_epoch=context_epoch,
+                    source_text=sentence,
                 )
             else:
                 diagnostics.record(
@@ -878,7 +879,8 @@ class SpellDaemon:
     def _rephrase_pipeline(self, sentence: str, raw_len: int, *, on_toast_ready=None,
                              mode_override: str | None = None,
                              target_window: int | None = None,
-                             context_epoch: int | None = None):
+                             context_epoch: int | None = None,
+                             source_text: str | None = None):
         """
         Runs in a background thread when Improve Writing is pressed.
         Always shows a toast so the user can review before committing.
@@ -887,6 +889,10 @@ class SpellDaemon:
 
         mode_override: if set (by an inline trigger prefix), overrides the
         configured writing mode for this single call only.
+
+        source_text: sentence as the user actually typed it, before any inline
+        trigger prefix was stripped. The document still holds that prefix, so
+        the replacement guard must verify against this, not `sentence`.
 
         A try/except wraps the entire body so that any exception from the LLM
         (model crash, OOM, llama.cpp error) still calls buf.finalize(), preventing
@@ -1015,6 +1021,7 @@ class SpellDaemon:
                     sentence, final_text, post, raw_len,
                     from_toast=True,
                     expected_window=target_window,
+                    expected_original=source_text,
                 )
                 queued_enters = self.buf.drain_queued_enters(context_epoch)
                 self.buf.finalize(
