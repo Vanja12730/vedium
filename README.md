@@ -9,6 +9,9 @@ model, or use a cloud API / CLI agent you already have.
 
 - Fix spelling and grammar of recently typed text with a hotkey, in any app
 - Rephrase modes (tone, clarity) and a small chat window
+- Writing modes to format selected text as bullet points, a numbered list,
+  a checklist, a Markdown table, or paragraphs with headings. Choose a mode in
+  **Settings → Assistant → Writing**, use your Writing hotkey, then review and replace as usual.
 - Save personal reflections to a selectable local Markdown journal, grouped by source
 - Save editable `Define This` results to a local vocabulary journal, grouped by term
 - Toast popups that show a diff of what was changed
@@ -68,9 +71,21 @@ CLI backends need nothing extra.
 4. Double-click the **Vedium** shortcut on your Desktop. A tray icon
    appears — right-click it to open Settings.
 
-No Python, no pip, no PATH changes — the install is fully self-contained,
-and uninstalling from *Add/Remove Programs* removes everything. It installs
-into your user profile, so there is no administrator prompt.
+No Python, no pip, no PATH changes — the install is fully self-contained.
+It installs into your user profile, so there is no administrator prompt.
+
+Uninstalling from *Add/Remove Programs* removes the app, its private Python,
+the local engine, any model downloaded into the install folder, and your
+settings, including custom modes and hotkeys. Two things stay behind:
+
+- **Saved API keys** stay in Windows Credential Manager, so a later reinstall
+  picks them up. To remove them, open **Credential Manager → Windows
+  Credentials** and remove each `Vedium/cloud_api_key/<provider>` entry. This
+  deletes only Vedium's saved copy: the key keeps working with its provider.
+  Credential Manager does not show the key itself, so keep your own copy if
+  you want to use it elsewhere.
+- **Your notes**, `Reflections.md` and `Vocabulary.md`, stay in
+  `Documents\Vedium` or the folder you chose for them.
 
 Reinstalling or upgrading into the same directory is incremental: Vedium
 preserves a compatible private Python environment, reuses an already-working
@@ -78,6 +93,28 @@ versioned local engine, keeps the existing model/backend configuration, and
 caches downloaded engine archives. A new engine is fetched only when its pinned
 llama.cpp build changes; a clean Python replacement happens only when the
 installer declares an incompatible private-runtime version.
+
+### Is the installer safe?
+
+The first time you run the installer, Windows shows **"Windows protected your
+PC"**. That is Microsoft Defender SmartScreen reporting an *unrecognised* app:
+the installer is not code-signed and has not yet been downloaded by many
+people. It does not mean a virus was found — when Microsoft Defender detects
+malware, it blocks the file and shows a threat alert.
+
+You can check the installer yourself instead of taking that on trust:
+
+- **Compare the checksum.** Each release lists the installer's SHA-256. In
+  PowerShell, in the folder you downloaded it to, run
+  `Get-FileHash .\VediumSetup_v*.exe` and compare the result. A match proves
+  the file is exactly the one published here.
+- **Scan it.** Upload it to [VirusTotal](https://www.virustotal.com) to check
+  it with dozens of antivirus engines at once. Unsigned installers sometimes
+  get a false positive from one or two lesser-known engines.
+- **Install from source** with Option 1 above: no installer, no warning, and
+  every line of code is readable.
+- **Build the installer yourself**, as described in
+  [Building the installer yourself](#building-the-installer-yourself).
 
 ## Optional CLI backends
 
@@ -163,7 +200,14 @@ exactly what it does:
   you just typed. The buffer lives in memory only; it is never written to
   disk and never leaves your machine on its own. It is erased before Vedium
   accepts typing from a different foreground window and immediately when you
-  disable Vedium from the tray.
+  disable Vedium from the tray. Capture also resets when the focused field
+  changes, on Tab, and on document clicks/shortcuts. Password fields are
+  excluded. Automatic capture pauses if Windows accessibility cannot confirm
+  a supported, non-password text field; unsupported editors may require an
+  explicit selection and manual copying of the result.
+- **Replacement:** Vedium verifies the source selection, the focused field,
+  and the active window before pasting. If the source changed, focus cannot be
+  verified, or the selection cannot be copied back, replacement is refused.
 - **Local model backend:** nothing is ever sent anywhere. The model runs on
   your machine and works with the internet unplugged.
 - **Cloud API backend:** the text being corrected (and only that text) is
@@ -173,7 +217,8 @@ exactly what it does:
   (Claude Code / Codex / Antigravity), which sends it to its provider under
   your existing account and its policies.
 - **API keys** are stored in the Windows Credential Manager, not in the
-  config file.
+  config file. They remain there after an uninstall until you remove them
+  (see [Install](#install)).
 - Vedium itself has **no telemetry, no analytics, no auto-update** — it
   only talks to the network when the backend you chose requires it.
 
