@@ -81,7 +81,7 @@ def test_installer_reuses_compatible_private_runtime_on_reinstall() -> None:
     install_delete = installer.split("[InstallDelete]", 1)[1].split("[Icons]", 1)[0]
 
     assert "UsePreviousAppDir=yes" in installer
-    assert '#define AppVersion   "1.3"' in installer
+    assert '#define AppVersion   "1.3.1"' in installer
     assert "ArchitecturesAllowed=x64compatible" in installer
     assert '#define PythonBundleVersion "3.12.9-ui2"' in installer
     assert 'Name: "{app}\\python"; Check: ShouldResetPythonBundle' in install_delete
