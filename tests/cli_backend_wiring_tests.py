@@ -49,6 +49,7 @@ def _load_isolated_llm():
     constants._CJK_RE = re.compile(r"[\u3400-\u9fff]")
     constants._word_count = lambda text: len(str(text).split())
     constants._is_answer_mode = lambda mode: mode == "What's This About?"
+    constants._FORMATTING_PROMPTS = {}
     sys.modules[constants.__name__] = constants
 
     config = types.ModuleType("vedium.config")

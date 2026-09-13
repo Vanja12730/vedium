@@ -4,14 +4,17 @@
 ' run.vbs — Launch Vedium without a console window.
 ' Interpreter preference (mirrors run_spell.bat):
 '   1. portable Python bundled by the installer (python\ next to this script)
-'   2. Python 3.12 via the py launcher — the prebuilt GPU llama-cpp-python
-'     wheel is a cp312 build, so local GGUF models need 3.12
-'   3. the py launcher's default Python (cloud / llama-server modes work fine)
-'   4. whatever pythonw is on PATH (last resort; PATH can be hijacked by venvs)
+'   2. development bundle (python_embed\ in a source/build checkout)
+'   3. Python 3.12 via the py launcher
+'   4. the py launcher's default Python
+'   5. whatever pythonw is on PATH (last resort; PATH can be hijacked by venvs)
 
 Set fso   = CreateObject("Scripting.FileSystemObject")
 appDir    = fso.GetParentFolderName(WScript.ScriptFullName)
 embedded  = appDir & "\python\pythonw.exe"
+If Not fso.FileExists(embedded) Then
+    embedded = appDir & "\python_embed\pythonw.exe"
+End If
 
 Set shell = CreateObject("WScript.Shell")
 shell.CurrentDirectory = appDir

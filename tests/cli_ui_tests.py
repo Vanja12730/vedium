@@ -51,10 +51,14 @@ keyboard.Key = _Keys()
 keyboard.KeyCode = _KeyCode
 keyboard.Controller = _Controller
 keyboard.Listener = _Listener
+mouse = types.ModuleType("pynput.mouse")
+mouse.Listener = _Listener
 pynput = types.ModuleType("pynput")
 pynput.keyboard = keyboard
+pynput.mouse = mouse
 sys.modules.setdefault("pynput", pynput)
 sys.modules.setdefault("pynput.keyboard", keyboard)
+sys.modules.setdefault("pynput.mouse", mouse)
 sys.modules.setdefault("pystray", types.ModuleType("pystray"))
 
 import tkinter as tk

@@ -92,13 +92,17 @@ class _FakeEditor:
 @contextlib.contextmanager
 def _wired(editor: _FakeEditor):
     """Point vedium.replacement at the fake editor instead of the real desktop."""
+    elapsed = [0.0]
     with (
         mock.patch.object(replacement, '_kbctrl', editor),
+        mock.patch.object(replacement, '_active_window_token', return_value=101),
         mock.patch.object(replacement, '_clipboard_get_text',
                           lambda: editor.clipboard),
         mock.patch.object(replacement, '_clipboard_set_text',
                           lambda text: setattr(editor, 'clipboard', text)),
-        mock.patch.object(replacement.time, 'sleep', lambda *_a, **_k: None),
+        mock.patch.object(replacement.time, 'sleep',
+                          lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)),
+        mock.patch.object(replacement.time, 'monotonic', lambda: elapsed[0]),
         mock.patch.object(replacement.diagnostics, 'record') as recorded,
     ):
         yield recorded
@@ -154,6 +158,59 @@ def test_matching_document_still_replaces() -> None:
     assert editor.text == "Hello world?", editor.text
 
 
+def test_captured_capitalization_difference_does_not_cancel_plain_sentence() -> None:
+    # Windows key translation can report lowercase while the document holds
+    # uppercase (Caps Lock or Shift state observed after the key event).
+    raw = "i am writing here"
+    editor = _FakeEditor("I am writing here.")
+    with _wired(editor):
+        replacement._do_replace(raw, "I am writing here", ".", "", len(raw))
+    assert editor.text == "I am writing here."
+    assert editor.anchor is None
+
+
+def test_smart_quotes_with_same_selection_span_do_not_cancel() -> None:
+    raw = "i can't go there"
+    editor = _FakeEditor("I can’t go there.")
+    with _wired(editor):
+        replacement._do_replace(raw, "I cannot go there", ".", "", len(raw))
+    assert editor.text == "I cannot go there."
+
+
+def test_cosmetic_source_match_keeps_later_typing_unchanged() -> None:
+    raw, post = "i am writing here", " Next DRAFT"
+    editor = _FakeEditor("I am writing here." + post)
+    with _wired(editor):
+        replacement._do_replace(raw, "I am writing here", ".", post, len(raw))
+    assert editor.text == "I am writing here." + post
+
+
+def test_cosmetic_match_does_not_allow_overwriting_different_later_typing() -> None:
+    raw, captured_post = "i am writing here", " next draft"
+    document = "I am writing here. Next DRAFT"
+    editor = _FakeEditor(document)
+    with _wired(editor):
+        try:
+            replacement._do_replace(raw, "I am writing here", ".", captured_post, len(raw))
+            raise AssertionError("later typing must not be changed by source normalization")
+        except replacement.ReplacementAborted:
+            pass
+    assert editor.text == document
+
+
+def test_explicit_selection_still_requires_exact_capitalization() -> None:
+    editor = _FakeEditor("KEEP THIS")
+    editor.anchor = 0
+    with _wired(editor):
+        try:
+            replacement._do_replace_selected_text(
+                "Changed text", "", expected_window=101, expected_original="keep this")
+            raise AssertionError("explicit selections must still match exactly")
+        except replacement.ReplacementAborted:
+            pass
+    assert editor.text == "KEEP THIS"
+
+
 def test_trailing_text_after_the_trigger_is_carried_along() -> None:
     raw = "helo world"
     editor = _FakeEditor(raw + "? and more")
@@ -178,15 +235,20 @@ def test_whitespace_only_differences_do_not_block() -> None:
     assert editor.text == "  Hello world?", editor.text
 
 
-def test_unreadable_selection_falls_back_to_replacing() -> None:
-    """Apps that refuse Ctrl+C must behave exactly as they did before the guard."""
+def test_unreadable_selection_is_refused() -> None:
+    """Never overwrite text when its selection cannot be verified."""
     raw = "helo world"
     editor = _FakeEditor(raw + "?", copy_works=False)
 
     with _wired(editor):
-        replacement._do_replace(raw, "Hello world", "?", "", raw_len=len(raw))
+        try:
+            replacement._do_replace(raw, "Hello world", "?", "", raw_len=len(raw))
+            raise AssertionError("unreadable selection must be refused")
+        except RuntimeError:
+            pass
 
-    assert editor.text == "Hello world?", editor.text
+    assert editor.text == raw + "?", editor.text
+    assert editor.anchor is None
 
 
 def test_rephrase_inline_trigger_prefix_is_not_a_false_mismatch() -> None:
@@ -218,6 +280,78 @@ def test_rephrase_desync_is_refused() -> None:
             pass
 
     assert editor.text == "I can't go there", editor.text
+
+
+def test_delayed_editor_copy_is_verified_before_replacement() -> None:
+    """A response later than the old 120ms cutoff is not a text mismatch."""
+    raw = "i am writing here"
+    editor = _FakeEditor(raw + ".", copy_works=False)
+    editor.clipboard = "previous clipboard"
+    pending = []
+    copies = []
+    original_press = editor.press
+
+    def press(key):
+        original_press(key)
+        if key == 'c' and _CMD_KEY in editor._held:
+            copies.append(key)
+            pending.append((replacement.time.monotonic() + 0.25, editor.selected))
+
+    def clipboard_get():
+        if pending and replacement.time.monotonic() >= pending[0][0]:
+            editor.clipboard = pending.pop(0)[1]
+        return editor.clipboard
+
+    with _wired(editor), mock.patch.object(editor, 'press', side_effect=press), \
+            mock.patch.object(replacement, '_clipboard_get_text', side_effect=clipboard_get):
+        replacement._do_replace(raw, "I am writing here", ".", "", len(raw))
+
+    assert editor.text == "I am writing here."
+    assert editor.clipboard == "previous clipboard"
+    assert copies == ['c'], "wait for the response instead of repeating copy keys"
+
+
+def test_unreadable_and_mismatched_selections_have_distinct_reasons() -> None:
+    for copy_works, document, reason in (
+        (False, "i am writing here.", "selection_unavailable"),
+        (True, "i am writing more.", "source_mismatch"),
+    ):
+        editor = _FakeEditor(document, copy_works=copy_works)
+        editor.clipboard = "previous clipboard"
+        with _wired(editor) as recorded:
+            try:
+                replacement._do_replace("i am writing here", "I am writing here", ".", "", 17)
+                raise AssertionError("verification must block this replacement")
+            except replacement.ReplacementAborted as exc:
+                assert exc.reason == reason
+        assert editor.text == document
+        assert editor.anchor is None
+        assert editor.clipboard == "previous clipboard"
+        log = str(recorded.call_args_list)
+        assert "autocorrect" not in log
+        assert document not in log and "previous clipboard" not in log
+        if copy_works:
+            assert "expected=" in log and "selected=" in log
+
+
+def test_focus_change_while_waiting_for_copy_aborts_and_restores_clipboard() -> None:
+    editor = _FakeEditor("i am writing here.", copy_works=False)
+    editor.clipboard = "previous clipboard"
+    sent = []
+
+    def guard():
+        if replacement.time.monotonic() >= 0.15:
+            raise replacement.ReplacementAborted("Focus moved; refusing to paste.")
+
+    with _wired(editor), mock.patch.object(editor, 'press', side_effect=lambda key: sent.append(key)):
+        try:
+            replacement._copy_selected_text(guard=guard)
+            raise AssertionError("a focus change must cancel the copy wait")
+        except replacement.ReplacementAborted:
+            pass
+    assert sent == ['c']
+    assert editor.clipboard == "previous clipboard"
+    assert editor.text == "i am writing here."
 
 
 if __name__ == "__main__":

@@ -72,7 +72,8 @@ def test_privacy_buffer_boundaries_are_wired() -> None:
     assert "self._sync_foreground_typing_context()" in daemon_source
     assert "self._start_foreground_watcher()" in daemon_source
     assert "self.buf.clear()" in daemon_source
-    assert "Typing buffer cleared because the foreground window changed" in daemon_source
+    assert "context != previous" in daemon_source
+    assert "context.can_capture" in daemon_source
 
 
 def test_installer_reuses_compatible_private_runtime_on_reinstall() -> None:
@@ -82,7 +83,7 @@ def test_installer_reuses_compatible_private_runtime_on_reinstall() -> None:
     assert "UsePreviousAppDir=yes" in installer
     assert '#define AppVersion   "1.3"' in installer
     assert "ArchitecturesAllowed=x64compatible" in installer
-    assert '#define PythonBundleVersion "3.12.9-ui1"' in installer
+    assert '#define PythonBundleVersion "3.12.9-ui2"' in installer
     assert 'Name: "{app}\\python"; Check: ShouldResetPythonBundle' in install_delete
     assert "function ShouldResetPythonBundle(): Boolean;" in installer
     assert ".vedium-bundle-version" in installer
@@ -263,6 +264,9 @@ def test_assistant_hotkeys_route_by_explicit_action() -> None:
             self.buffered = None
             self.trigger_calls = 0
 
+        def epoch(self):
+            return 0
+
         def is_busy_or_pending(self):
             return False
 
@@ -274,7 +278,9 @@ def test_assistant_hotkeys_route_by_explicit_action() -> None:
     notices = []
     namespace = {
         "_active_window_token": lambda: None,
-        "_copy_selected_text": lambda: (selection[0], "old clipboard"),
+        "_copy_selected_text": lambda **_kw: (selection[0], "old clipboard"),
+        "focused_context": lambda: None,
+        "_target_guard": lambda *_a: lambda: None,
         "_info_toast": notices.append,
         "_is_answer_mode": lambda mode: mode in {
             "What's This About?", "Define This", "Key Takeaways",

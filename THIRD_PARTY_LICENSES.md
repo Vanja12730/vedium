@@ -15,6 +15,7 @@ distributed under the GPL-3.0.
 | [pynput](https://github.com/moses-palmer/pynput) | LGPL-3.0 | yes |
 | [pystray](https://github.com/moses-palmer/pystray) | LGPL-3.0 | yes |
 | [Pillow](https://python-pillow.org/) | MIT-CMU | yes |
+| [comtypes](https://github.com/enthought/comtypes) | MIT — full notice in its bundled `*.dist-info/licenses/LICENSE.txt` | yes |
 | [CPython](https://www.python.org/) (embeddable build + Tcl/Tk) | PSF-2.0 | yes |
 | [llama.cpp](https://github.com/ggml-org/llama.cpp) | MIT — see `licenses/llama.cpp-LICENSE.txt` | downloaded by setup when a local engine is selected |
 | [NVIDIA CUDA runtime libraries](https://docs.nvidia.com/cuda/eula/index.html) | NVIDIA Software License Agreement — see `licenses/NVIDIA-CUDA-NOTICE.txt` | downloaded by setup only for the NVIDIA engine |

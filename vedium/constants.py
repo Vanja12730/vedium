@@ -244,7 +244,8 @@ def _modes_with_headers(flat_modes: list[str]) -> list[str]:
          {"Polish My Writing", "More Casual", "More Formal (Academic)",
           "Diplomatically Worded", "More Concise", "More Detailed",
           "Simpler Language", "Sharpen the Thesis", "Draft a Counterargument",
-          "Diacritics Only"}),
+          "Diacritics Only", "Format as Bullet Points", "Format as Numbered List",
+          "Format as Checklist", "Format as Table", "Add Headings"}),
     ]
     result: list[str] = []
     seen:   set[str]  = set()
@@ -285,6 +286,11 @@ REPHRASE_MODES = [
     "Simpler Language",
     "Sharpen the Thesis",
     "Draft a Counterargument",
+    "Format as Bullet Points",
+    "Format as Numbered List",
+    "Format as Checklist",
+    "Format as Table",
+    "Add Headings",
     "Diacritics Only",
     "Translate BHS → English",
     "Translate English → BHS",
@@ -521,6 +527,49 @@ _REPHRASE_PROMPTS = {
         "Return ONLY the rewritten text. No explanation. No extra lines."
     ),
 }
+
+_FORMATTING_PROMPTS = {
+    "Format as Bullet Points": (
+        "Arrange the text as a bullet list, each item beginning with '• '. "
+        "Use one item per distinct point and indented sub-bullets for its supporting details. "
+        "Keep the source order where it matters. Do not turn it into a short summary."
+    ),
+    "Format as Numbered List": (
+        "Arrange the text as a numbered list using '1. ', '2. ', and so on. "
+        "Keep the source order and keep supporting details with their point. "
+        "Number existing points or steps without inventing a sequence, priority, or missing steps."
+    ),
+    "Format as Checklist": (
+        "Arrange explicit tasks or requirements as a checklist with '- [ ] ' before each item. "
+        "Use '- [x] ' only for tasks explicitly stated to be completed. "
+        "Keep deadlines, owners, conditions, and supporting details with their task. "
+        "Keep non-actionable information in a short Notes section instead of inventing tasks from it. "
+        "If there are no tasks or requirements, preserve the text without adding checkboxes."
+    ),
+    "Format as Table": (
+        "Arrange the information as a Markdown pipe table with a header and separator row. "
+        "Choose useful columns from the information present, such as Item and Details. "
+        "Use as many rows as needed to retain all information. Leave cells blank for missing "
+        "values; never guess them. Escape literal pipe characters within cells. "
+        "Keep cell contents on a single line, separating multiple details with semicolons."
+    ),
+    "Add Headings": (
+        "Organise the text into readable paragraphs under short, descriptive headings. "
+        "Put each heading on its own line, with a blank line before the paragraph below. "
+        "Use plain-text headings without Markdown markers. Derive headings only from the "
+        "content; do not add an introduction, conclusion, or empty sections. "
+        "Keep the original sentences and their order wherever possible."
+    ),
+}
+for _format_mode, _format_instruction in _FORMATTING_PROMPTS.items():
+    _REPHRASE_PROMPTS[_format_mode] = (
+        "Format the supplied text into the requested structure. "
+        "Preserve every fact, claim, qualification, name, number, attribution, and concrete detail. "
+        "Preserve the original meaning, uncertainty, and language. Do not summarise or add new content. "
+        "Make only wording changes necessary to fit the structure. "
+        + _format_instruction +
+        " Return ONLY the formatted text, without a preamble, explanation, or enclosing code fence."
+    )
 
 _FACTORY_PROMPTS = {}
 _FACTORY_PROMPTS.update(_REPHRASE_PROMPTS)

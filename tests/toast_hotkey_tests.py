@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from vedium.input_context import InputContext
 from vedium.buffer import _Buffer
 from vedium import daemon
 from vedium.daemon import _matches_toast_accept_hotkey
@@ -142,10 +143,12 @@ def test_daemon_dismisses_visible_toast_when_trigger_is_deleted() -> None:
     app._active_rephrase_toast = None
     app._foreground_lock = threading.Lock()
     app._buffer_window = 101
+    app._buffer_context = InputContext(101, 99999, (1,), False, True)
     app._ctrl_held = app._alt_held = app._shift_held = False
 
     with (
         mock.patch.object(daemon, "_active_window_token", return_value=101),
+        mock.patch.object(daemon, "focused_context", return_value=app._buffer_context),
         mock.patch.object(daemon, "_window_process_id", return_value=99999),
     ):
         app._on_press_impl(Key.backspace)
@@ -189,12 +192,14 @@ def test_new_sentence_advances_past_untouched_toast_immediately() -> None:
     app._active_rephrase_toast = None
     app._foreground_lock = threading.Lock()
     app._buffer_window = 101
+    app._buffer_context = InputContext(101, 99999, (1,), False, True)
     app._ctrl_held = app._alt_held = app._shift_held = False
     enqueued = []
     app._enqueue_sentence = lambda *args, **kwargs: enqueued.append((args, kwargs))
 
     with (
         mock.patch.object(daemon, "_active_window_token", return_value=101),
+        mock.patch.object(daemon, "focused_context", return_value=app._buffer_context),
         mock.patch.object(daemon, "_window_process_id", return_value=99999),
     ):
         app._on_press_impl(KeyCode.from_char("."))

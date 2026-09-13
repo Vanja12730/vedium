@@ -67,6 +67,8 @@ def _build_behaviour_tab(ui):
         f"Working language set to {lang_var.get()}."))
     tk.Label(lf, text="Auto: output stays in the same language as the input",
              font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w")
+    tk.Label(lf, text="Choose a language to translate corrections into that language",
+             font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w")
 
     # ── Spell-check mode radio group ─────────────────────────────────────────
     # Three options in one row: Auto (silent replace) / Toast / Off.
@@ -90,6 +92,11 @@ def _build_behaviour_tab(ui):
         ).pack(anchor="w")
     tk.Label(sc_frame,
              text="Off disables sentence correction; both Assistant hotkeys still work",
+             font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w", pady=(2, 0))
+    tk.Label(sc_frame,
+             text="Auto and Toast require a local model, llama-server, or cloud API.\n"
+                  "AI CLI supports manual corrections with Improve Writing only.",
+             justify="left", wraplength=380,
              font=("Segoe UI", 8), bg=BG, fg=MUTED).pack(anchor="w", pady=(2, 0))
 
     # The primary review-card action used to be fixed at Ctrl+Enter. Keep that

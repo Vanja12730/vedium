@@ -15,7 +15,7 @@ import time
 import json
 import threading
 
-from vedium.constants import _REPHRASE_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
+from vedium.constants import _REPHRASE_PROMPTS, _FORMATTING_PROMPTS, _CJK_RE, _word_count, _is_answer_mode
 from vedium.config import load_cfg
 from vedium.language import detect_language, is_same_language
 from vedium.prompt_builder import _build_prompt, _build_chat_prompt
@@ -518,7 +518,9 @@ def rephrase_sentence_stream(text: str, fmt: str, mode: str, working_language: s
         # all three source judgments in 20/20 runs at 1.1, but only 17/20 at
         # 1.2 and 1.3.  Reading answers are short and do not need the heavier
         # anti-loop setting used for open-ended rewrites.
-        repeat_penalty = 1.1 if _is_answer_mode(mode) else 1.3
+        # Formatting also needs repeated list markers, table separators and
+        # repeated values; do not penalise their necessary repetition heavily.
+        repeat_penalty = 1.1 if _is_answer_mode(mode) or mode in _FORMATTING_PROMPTS else 1.3
 
         _first_chunk = True
         for chunk in _stream_prompt(

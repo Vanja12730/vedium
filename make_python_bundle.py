@@ -33,7 +33,7 @@ PY_VERSION = "3.12.9"
 EMBED_ZIP_NAME = f"python-{PY_VERSION}-embed-amd64.zip"
 EMBED_ZIP_URL = f"https://www.python.org/ftp/python/{PY_VERSION}/{EMBED_ZIP_NAME}"
 GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
-UI_PACKAGES = ["pystray", "pillow", "pynput"]
+UI_PACKAGES = ["pystray", "pillow", "pynput>=1.8.2", "comtypes>=1.4,<2"]
 
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "build_cache"
@@ -105,7 +105,7 @@ def main() -> None:
     print("[6/6] Smoke test (tkinter + UI packages + vedium import)")
     run_bundle_python(
         "-c",
-        "import tkinter, tkinter.ttk, pystray, pynput; "
+        "import tkinter, tkinter.ttk, pystray, pynput, comtypes; "
         "from PIL import Image; "
         "import vedium; "
         "print('bundle OK  tk', tkinter.TkVersion)",

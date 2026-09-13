@@ -3,9 +3,10 @@
 # Requires Python 3.10+ with tkinter (included in the python.org installer).
 # Install with:  pip install -r requirements.txt
 
-pynput>=1.7.6      # global keyboard listener + synthetic keystrokes
+pynput>=1.8.2      # injected-event metadata keeps replacement input out of capture
 pystray>=0.19.5    # system tray icon
 Pillow>=10.0       # tray icon rendering
+comtypes>=1.4,<2; sys_platform == 'win32'  # UI Automation field/password checks
 
 # Local GGUF inference uses a separate managed llama-server distribution; see
 # GPU_INSTALL_GUIDE.md. It is intentionally not a Python package dependency.

@@ -44,7 +44,7 @@
 ; Bump this only when the portable Python/runtime dependency bundle changes in
 ; an incompatible way. Code-only Vedium updates should leave it unchanged so
 ; reinstalls retain private packages and the separately cached local engine.
-#define PythonBundleVersion "3.12.9-ui1"
+#define PythonBundleVersion "3.12.9-ui2"
 
 [Setup]
 ; Unique app identity for Windows (Add/Remove Programs, upgrade detection).
@@ -113,6 +113,9 @@ Type: filesandordirs; Name: "{app}\python"; Check: ShouldResetPythonBundle
 ; Pre-rename package dir (the package was called spell_daemon before v1.2) —
 ; without this an upgrade would leave the old copy of the app behind.
 Type: filesandordirs; Name: "{app}\spell_daemon"
+; Remove the retired preview widget from installations that included it.
+Type: files; Name: "{app}\vedium\ui_markdown.py"
+Type: files; Name: "{app}\vedium\__pycache__\ui_markdown.*.pyc"
 ; Remove an obsolete dependency log name left by pre-managed-engine installers.
 Type: files; Name: "{app}\install-engine.log"
 
@@ -655,7 +658,7 @@ end;
 
 
 // ── UI packages: pystray / pillow / pynput ───────────────────────────────────
-// Safety net — the bundle ships all three pre-installed, so normally this just
+// Safety net — the bundle ships all four pre-installed, so normally this just
 // adds ✓ lines to the completion summary. It only prompts and installs when
 // one is missing (e.g. a hand-edited or damaged install folder).
 procedure InstallUIDeps();
@@ -670,7 +673,7 @@ begin
   Present    := '';
   MissingStr := '';
   Count      := 0;
-  SetArrayLength(MissingPkgs, 3);
+  SetArrayLength(MissingPkgs, 4);
 
   if PyRun('-c "import pystray"') then
     Present := Present + '  ✓  pystray' + #13#10
@@ -686,11 +689,18 @@ begin
     MissingStr := MissingStr + '  •  pillow' + #13#10;
   end;
 
-  if PyRun('-c "import pynput"') then
+  if PyRun('-c "import pynput; from importlib.metadata import version; assert tuple(map(int, version(''pynput'').split(''.''))) >= (1, 8, 2)"') then
     Present := Present + '  ✓  pynput' + #13#10
   else begin
-    MissingPkgs[Count] := 'pynput'; Inc(Count);
+    MissingPkgs[Count] := 'pynput>=1.8.2'; Inc(Count);
     MissingStr := MissingStr + '  •  pynput' + #13#10;
+  end;
+
+  if PyRun('-c "import comtypes"') then
+    Present := Present + '  ✓  comtypes' + #13#10
+  else begin
+    MissingPkgs[Count] := 'comtypes>=1.4,<2'; Inc(Count);
+    MissingStr := MissingStr + '  •  comtypes' + #13#10;
   end;
 
   SetArrayLength(MissingPkgs, Count);
@@ -715,7 +725,7 @@ begin
   begin
     MsgBox(
       'Skipped. You can install them manually any time:' + #13#10 + #13#10 +
-      '  "' + GPythonExe + '" -m pip install pystray pillow pynput',
+      '  "' + GPythonExe + '" -m pip install pystray pillow "pynput>=1.8.2" "comtypes>=1.4,<2"',
       mbInformation, MB_OK);
     Exit;
   end;

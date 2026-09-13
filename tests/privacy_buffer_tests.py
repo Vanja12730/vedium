@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from vedium.input_context import InputContext
 from vedium.buffer import _Buffer
 from vedium import daemon
 
@@ -24,6 +25,8 @@ def _bare_daemon() -> daemon.SpellDaemon:
     app.buf = _Buffer()
     app._foreground_lock = threading.Lock()
     app._buffer_window = None
+    app._buffer_context = None
+    app._ctrl_held = app._alt_held = app._shift_held = False
     app._active_spell_toast_lock = threading.Lock()
     app._active_spell_toast = None
     app._active_rephrase_lock = threading.Lock()
@@ -59,6 +62,7 @@ def test_foreground_change_clears_before_new_window_input() -> None:
     active = [101]
     with (
         mock.patch.object(daemon, "_active_window_token", side_effect=lambda: active[0]),
+        mock.patch.object(daemon, "focused_context", side_effect=lambda: InputContext(active[0], 99999, (active[0],), False, True)),
         mock.patch.object(daemon, "_window_process_id", return_value=99999),
     ):
         app._sync_foreground_typing_context()

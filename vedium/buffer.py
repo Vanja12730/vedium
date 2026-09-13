@@ -297,6 +297,10 @@ class _Buffer:
         with self._lk:
             return self._busy or self._pending
 
+    def is_busy(self) -> bool:
+        with self._lk:
+            return self._busy
+
     def cursor_moved(self, expected_epoch: int | None = None) -> bool:
         with self._lk:
             if expected_epoch is not None and expected_epoch != self._epoch:

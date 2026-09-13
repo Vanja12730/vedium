@@ -11,8 +11,10 @@ import functools
 import pystray
 from pynput.keyboard import Key, KeyCode
 import pynput.keyboard as _pynput_kb
+import pynput.mouse as _pynput_mouse
 
 from vedium import diagnostics
+from vedium.input_context import focused_context, window_at_point
 from vedium.constants import (
     _OS_RESERVED_HOTKEYS,
     _CTRL_KEYS,
@@ -27,6 +29,7 @@ from vedium.config import load_cfg, save_cfg, resolve_prompt_format
 from vedium.language import is_same_language
 from vedium.buffer import _Buffer
 from vedium.replacement import (
+    ReplacementAborted,
     _kbctrl,
     _active_window_token,
     _window_process_id,
@@ -34,6 +37,7 @@ from vedium.replacement import (
     _do_replace,
     _do_replace_rephrase,
     _do_replace_selected_text,
+    _target_guard,
 )
 from vedium.llm import (
     _stream_cancel,
@@ -74,6 +78,15 @@ _SHIFT_KEYS = frozenset({Key.shift, Key.shift_l, Key.shift_r})
 def _surface_cli_error(exc: Exception) -> None:
     if isinstance(exc, CLIModelError):
         _info_toast(f"AI CLI error: {exc}")
+
+
+def _surface_replacement_abort(exc=None):
+    reason = getattr(exc, "reason", "context")
+    message = {
+        "selection_unavailable": "Replacement cancelled: the editor did not return the selected text.",
+        "source_mismatch": "Replacement cancelled: the selected text did not match the captured sentence.",
+    }.get(reason, "Replacement cancelled: the source or focus could not be verified.")
+    _info_toast(message + " Select the sentence and use Improve Writing to try again.")
 
 
 def _matches_toast_accept_hotkey(
@@ -168,6 +181,7 @@ class SpellDaemon:
         self.buf       = _Buffer()
         self._icon     = None
         self._listener = None
+        self._mouse_listener = None
         self._active_rephrase_toast = None             # _EditableToast currently shown, or None
         self._active_rephrase_lock  = threading.Lock() # guards _active_rephrase_toast
         self._active_spell_toast    = None             # _Toast currently shown, or None
@@ -184,6 +198,7 @@ class SpellDaemon:
         # never share a sentence buffer.
         self._foreground_lock       = threading.Lock()
         self._buffer_window         = None
+        self._buffer_context        = None
         self._foreground_worker     = None
         self._stop_foreground_worker = threading.Event()
 
@@ -227,7 +242,8 @@ class SpellDaemon:
                           context_epoch: int | None = None):
         """Queue one completed sentence for the sequential spell-check pipeline."""
         self._sentence_queue.put(
-            (sentence, punct, raw_len, leading_ws, target_window, context_epoch)
+            (sentence, punct, raw_len, leading_ws, target_window, context_epoch,
+             self._buffer_context)
         )
 
     def _sync_foreground_typing_context(self):
@@ -242,30 +258,37 @@ class SpellDaemon:
         with self._active_rephrase_lock:
             rephrase_toast_active = self._active_rephrase_toast is not None
         current = _active_window_token()
-        if current is None:
-            return
         # A review toast is a temporary Vedium-owned foreground window. Keep
         # the originating app's context while the user edits/accepts it, but do
         # not exempt an unrelated external window merely because a toast exists.
         if (spell_toast_active or rephrase_toast_active) and (
             _window_process_id(current) == os.getpid()
         ):
-            return
+            return False
+        context = focused_context() if current else None
+        if context is not None and context.window != current:
+            context = None
         with self._foreground_lock:
-            previous = self._buffer_window
-            if previous is None:
-                self._buffer_window = current
-                return
-            if current == previous:
-                return
+            previous = self._buffer_context
             self._buffer_window = current
+            self._buffer_context = context
+            if context is None or context != previous:
+                # Keep context publication and invalidation ordered across the
+                # watcher and keyboard threads. No buffer code takes this lock.
+                self.buf.clear()
+        return context is not None and context.can_capture
 
-        # Do not hold the foreground lock while taking the buffer lock.
-        self.buf.clear()
-        diagnostics.record(
-            "privacy", "info",
-            "Typing buffer cleared because the foreground window changed.",
-        )
+    def _replacement_is_current(self, context_epoch):
+        return self.cfg.get("enabled", True) and self.buf.is_epoch_current(context_epoch)
+
+    def _on_click(self, _x, _y, _button, pressed, injected=False):
+        # Mouse clicks can move a caret/selection without changing the UIA
+        # field. Invalidate on button-down, before selection/focus can change.
+        # Hit-test the clicked window: a review card may not own focus yet.
+        if not pressed or injected or not self.cfg.get("enabled", True):
+            return
+        if _window_process_id(window_at_point(_x, _y)) != os.getpid():
+            self.buf.clear()
 
     def _foreground_watch_loop(self):
         """Erase abandoned typing shortly after focus moves to another window.
@@ -292,7 +315,9 @@ class SpellDaemon:
 
     # ── Keyboard listener ─────────────────────────────────────────────────────
 
-    def _on_press(self, key):
+    def _on_press(self, key, injected=False):
+        if injected:
+            return  # our selection/copy/paste must not invalidate its own job
         # pynput stops the listener thread if a callback raises, which would
         # silently kill ALL keyboard handling until the app is restarted.
         # Catch everything, log it, and keep listening.
@@ -314,7 +339,7 @@ class SpellDaemon:
     def _on_press_impl(self, key):
         if not self.cfg.get("enabled", True):
             return
-        self._sync_foreground_typing_context()
+        can_capture = self._sync_foreground_typing_context()
         idle_sec = self.cfg.get("idle_reset_sec", 30.0)
 
         if key in _CTRL_KEYS:
@@ -389,6 +414,18 @@ class SpellDaemon:
                     daemon=True,
                 ).start()
                 return
+
+        if not can_capture:
+            return
+        # Tab and document shortcuts are context/edit boundaries even when the
+        # host reuses the same accessible editor (e.g. a browser changing tabs).
+        if key == Key.tab or self._ctrl_held or self._alt_held:
+            self.buf.clear()
+            return
+        if self.buf.is_busy():
+            # Physical input during a replacement or selected-text review makes
+            # that job stale. Synthetic input was filtered in _on_press.
+            self.buf.clear()
 
         try:
             c = key.char
@@ -482,8 +519,10 @@ class SpellDaemon:
             elif key == Key.enter:
                 self.buf.key_enter(idle_sec)
 
-    def _on_release(self, key):
+    def _on_release(self, key, injected=False):
         """Clear tracked shortcut modifiers when their keys are released."""
+        if injected:
+            return
         # Same guard as _on_press: an exception here would stop the listener.
         try:
             if not self.cfg.get("enabled", True):
@@ -532,6 +571,8 @@ class SpellDaemon:
         try:
             self._handle_rephrase_hotkey_impl(action, on_toast_ready=release_lock,
                                               mode_override=mode_override)
+        except ReplacementAborted as exc:
+            _surface_replacement_abort(exc)
         finally:
             # Safety net: release the lock here if on_toast_ready was never called
             # (e.g. early-exit paths where no toast is shown).
@@ -560,6 +601,10 @@ class SpellDaemon:
         previous_clipboard = ""
         triggers = self.cfg.get("mode_triggers", {})
         target_window = _active_window_token()
+        target_context = focused_context()
+        context_epoch = self.buf.epoch()
+        if not self.cfg.get("enabled", True) or (target_context and target_context.password is True):
+            return
         is_understand = action == "understand"
         default_mode = self.cfg.get(
             "rephrase_reading_mode" if is_understand else "rephrase_writing_mode",
@@ -580,7 +625,12 @@ class SpellDaemon:
         try:
             # Both actions prefer an explicit selection. Understand stops here
             # if there is none; Improve Writing may fall back to the buffer.
-            selected_text, previous_clipboard = _copy_selected_text()
+            selected_text, previous_clipboard = _copy_selected_text(
+                guard=_target_guard(
+                    target_window, target_context,
+                    lambda: self._replacement_is_current(context_epoch),
+                ),
+            )
             if selected_text and selected_text.strip():
                 resolved_mode, clean_selected = resolve_mode(selected_text)
                 # A deliberate selection is valid even when it is one word.
@@ -590,6 +640,9 @@ class SpellDaemon:
                         on_toast_ready=on_toast_ready,
                         mode_override=resolved_mode,
                         target_window=target_window,
+                        target_context=target_context,
+                        context_epoch=context_epoch,
+                        source_text=selected_text,
                     )
                     return
 
@@ -612,6 +665,7 @@ class SpellDaemon:
                     on_toast_ready=on_toast_ready,
                     mode_override=resolved_mode,
                     target_window=target_window,
+                    target_context=target_context,
                     context_epoch=context_epoch,
                     source_text=sentence,
                 )
@@ -629,7 +683,7 @@ class SpellDaemon:
 
     def _pipeline(self, sentence: str, punct: str, raw_len: int,
                   leading_ws: str = "", target_window: int | None = None,
-                  context_epoch: int | None = None):
+                  context_epoch: int | None = None, target_context=None):
         """
         Runs in a background thread. Spell-checks `sentence`, then either:
           - silently replaces (spell_check_mode=Auto, cursor didn't move, fast enough), or
@@ -776,6 +830,8 @@ class SpellDaemon:
                 _do_replace(
                     sentence, corrected, punct, post, raw_len, leading_ws,
                     expected_window=target_window,
+                    expected_context=target_context,
+                    validate=lambda: target_context is not None and self._replacement_is_current(context_epoch),
                 )
                 queued_enters = self.buf.drain_queued_enters(context_epoch)
                 self.buf.finalize(
@@ -850,7 +906,9 @@ class SpellDaemon:
                     # to release modifiers and allow focus to settle before replacing.
                     _do_replace(sentence, corrected, punct, post2, raw_len, leading_ws,
                                 from_toast=True,
-                                expected_window=target_window)
+                                expected_window=target_window,
+                                expected_context=target_context,
+                                validate=lambda: target_context is not None and self._replacement_is_current(context_epoch))
                     queued_enters = self.buf.drain_queued_enters(context_epoch)
                     self.buf.finalize(
                         replaced=True, completed_text=corrected + punct,
@@ -867,9 +925,13 @@ class SpellDaemon:
         except Exception as exc:
             # LLM crash, OOM, or any other unexpected error — release the pending
             # lock so the daemon can continue processing future sentences.
+            self.buf.finalize(replaced=False, expected_epoch=context_epoch)
+            if isinstance(exc, ReplacementAborted):
+                diagnostics.record("replacement", "warning", "Automatic/review replacement cancelled.", str(exc))
+                _surface_replacement_abort(exc)
+                return
             diagnostics.record("spell", "error", "Spell-check pipeline failed.", str(exc))
             _surface_cli_error(exc)
-            self.buf.finalize(replaced=False, expected_epoch=context_epoch)
             raise
         finally:
             diagnostics.set_status(busy=False)
@@ -880,7 +942,7 @@ class SpellDaemon:
                              mode_override: str | None = None,
                              target_window: int | None = None,
                              context_epoch: int | None = None,
-                             source_text: str | None = None):
+                             source_text: str | None = None, target_context=None):
         """
         Runs in a background thread when Improve Writing is pressed.
         Always shows a toast so the user can review before committing.
@@ -1022,6 +1084,8 @@ class SpellDaemon:
                     from_toast=True,
                     expected_window=target_window,
                     expected_original=source_text,
+                    expected_context=target_context,
+                    validate=lambda: target_context is not None and self._replacement_is_current(context_epoch),
                 )
                 queued_enters = self.buf.drain_queued_enters(context_epoch)
                 self.buf.finalize(
@@ -1041,9 +1105,13 @@ class SpellDaemon:
             # LLM crash, OOM, or any other unexpected error — release the pending
             # lock so the daemon can continue processing future sentences.
             self._dismiss_rephrase_toast(toast)
+            self.buf.finalize(replaced=False, expected_epoch=context_epoch)
+            if isinstance(exc, ReplacementAborted):
+                diagnostics.record("replacement", "warning", "Rephrase replacement cancelled.", str(exc))
+                _surface_replacement_abort(exc)
+                return
             diagnostics.record("rephrase", "error", "Rephrase pipeline failed.", str(exc))
             _surface_cli_error(exc)
-            self.buf.finalize(replaced=False, expected_epoch=context_epoch)
             raise
         finally:
             diagnostics.set_status(busy=False)
@@ -1053,7 +1121,9 @@ class SpellDaemon:
     def _selected_rephrase_pipeline(self, selected_text: str, previous_clipboard: str,
                                      *, on_toast_ready=None,
                                      mode_override: str | None = None,
-                                     target_window: int | None = None):
+                                     target_window: int | None = None,
+                                     target_context=None, context_epoch=None,
+                                     source_text: str | None = None):
         """
         Process currently selected text, show a review box, and replace the
         selection only if accepted. Selected/replacement text is kept only in
@@ -1068,6 +1138,10 @@ class SpellDaemon:
         """
         corrected = ""
         toast = None
+        if context_epoch is None:
+            context_epoch = self.buf.epoch()
+        if not self._replacement_is_current(context_epoch):
+            return
         diagnostics.set_status(busy=True)
         try:
             mode = mode_override or self.cfg.get("rephrase_reading_mode", "What's This About?")
@@ -1105,7 +1179,9 @@ class SpellDaemon:
             # concurrently and leaving the first toast orphaned.  Both pipelines
             # would then attempt _do_replace_selected_text, corrupting the document.
             # The finally block always calls set_busy(False) to release the flag.
-            self.buf.set_busy(True)
+            if not self.buf.set_busy(True, expected_epoch=context_epoch):
+                self._dismiss_rephrase_toast(toast)
+                return
 
             chunks = []
             last_visible = [None]
@@ -1125,6 +1201,10 @@ class SpellDaemon:
 
             corrected = "".join(chunks).strip()
             corrected = _clean_llm_output(corrected)
+
+            if not self._replacement_is_current(context_epoch):
+                self._dismiss_rephrase_toast(toast)
+                return
 
             if mode == "Diacritics Only":
                 corrected = _safe_model_correction(
@@ -1155,6 +1235,9 @@ class SpellDaemon:
                 _do_replace_selected_text(
                     final_text, previous_clipboard,
                     expected_window=target_window,
+                    expected_original=selected_text if source_text is None else source_text,
+                    expected_context=target_context,
+                    validate=lambda: target_context is not None and self._replacement_is_current(context_epoch),
                 )
                 diagnostics.record("rephrase", "info", "Selected text rephrase accepted.")
                 final_text = ""
@@ -1162,6 +1245,10 @@ class SpellDaemon:
                 diagnostics.record("rephrase", "info", "Selected text rephrase ignored.")
         except Exception as exc:
             self._dismiss_rephrase_toast(toast)
+            if isinstance(exc, ReplacementAborted):
+                diagnostics.record("replacement", "warning", "Selected-text replacement cancelled.", str(exc))
+                _surface_replacement_abort(exc)
+                return
             message = (
                 "Selected-text CLI request failed."
                 if isinstance(exc, CLIModelError)
@@ -1174,7 +1261,7 @@ class SpellDaemon:
             selected_text = ""
             corrected = ""
             previous_clipboard = ""
-            self.buf.set_busy(False)
+            self.buf.set_busy(False, expected_epoch=context_epoch)
             diagnostics.set_status(busy=False)
 
 
@@ -1189,6 +1276,7 @@ class SpellDaemon:
             self.buf.clear()
             with self._foreground_lock:
                 self._buffer_window = None
+                self._buffer_context = None
             _stream_cancel.set()
         save_cfg(self.cfg)
         diagnostics.set_status(enabled=self.cfg["enabled"])
@@ -1230,6 +1318,8 @@ class SpellDaemon:
         icon.stop()
         if self._listener:
             self._listener.stop()
+        if self._mouse_listener:
+            self._mouse_listener.stop()
         os._exit(0)
 
     def _record_startup_readiness(self):
@@ -1413,6 +1503,8 @@ class SpellDaemon:
         # Start global keyboard listener
         self._listener = _pynput_kb.Listener(on_press=self._on_press, on_release=self._on_release)
         self._listener.start()
+        self._mouse_listener = _pynput_mouse.Listener(on_click=self._on_click)
+        self._mouse_listener.start()
 
         # Build and run system-tray icon (blocks until Quit)
         enabled = self.cfg.get("enabled", True)

@@ -118,6 +118,41 @@ def test_unknown_rephrase_mode_falls_back_visibly() -> None:
         assert not events
 
 
+def test_formatting_modes_use_writing_pipeline_and_preserve_structured_output() -> None:
+    from vedium import constants as c
+    from vedium.config import _merge_custom_modes
+    from unittest import mock
+
+    examples = {
+        "Format as Bullet Points": "• Send the report by Friday.\n• Review the budget.",
+        "Format as Numbered List": "1. Send the report by Friday.\n2. Review the budget.",
+        "Format as Checklist": "- [ ] Send the report by Friday.\n- [ ] Review the budget.",
+        "Format as Table": "| Task | Deadline |\n| --- | --- |\n| Send the report | Friday |\n| Review the budget | |",
+        "Add Headings": "Report\n\nSend the report by Friday.\n\nBudget\n\nReview the budget.",
+    }
+    captured = []
+    _merge_custom_modes({})
+    with _fake_backend(captured) as llm:
+        llm._stream_cancel.clear()
+        for mode, expected in examples.items():
+            assert mode in c._BUILTIN_MODES
+            assert not c._is_answer_mode(mode), mode
+            assert c.REPHRASE_MODES.index("── Writing (replaces) ──") < c.REPHRASE_MODES.index(mode)
+            assert c.REPHRASE_MODES.index(mode) < c.REPHRASE_MODES.index("── Translation ──")
+            def chunks(*args, **kwargs):
+                for line in expected.splitlines(keepends=True):
+                    yield {"choices": [{"text": line}]}
+            with mock.patch.object(llm, "_stream_prompt", side_effect=chunks) as stream:
+                result = "".join(llm.rephrase_sentence_stream(
+                    "Send the report by Friday. Review the budget.",
+                    "Plain  (no template)", mode=mode,
+                ))
+            assert stream.call_args.kwargs["repeat_penalty"] == 1.1
+            assert llm._clean_llm_output(result) == expected, mode
+            assert c._FACTORY_PROMPTS[mode] in captured[-1][1], mode
+            assert "Do not summarise or add new content" in captured[-1][1]
+
+
 def test_light_writing_modes_have_guardrails() -> None:
     """'More Casual', 'Simpler Language', and 'More Formal (Academic)' must
     carry the same don't-invent / preserve-details fences as the other writing
@@ -935,6 +970,7 @@ def main() -> int:
     tests = [
         test_diacritics_spell_check_uses_live_mode_prompt,
         test_unknown_rephrase_mode_falls_back_visibly,
+        test_formatting_modes_use_writing_pipeline_and_preserve_structured_output,
         test_light_writing_modes_have_guardrails,
         test_explain_it_is_source_bounded,
         test_answer_modes_use_a_gentler_repeat_penalty,
