@@ -5,6 +5,14 @@ hotkey, fixes or rephrases the text you just typed — in any application — an
 shows you exactly what changed. It can run **fully offline** with a local AI
 model, or use a cloud API / CLI agent you already have.
 
+## Demo
+
+A quick look at Vedium, with quiet background music.
+
+https://github.com/user-attachments/assets/7feec6a4-bf3b-4c9e-8f3c-ca4f44438751
+
+[Download the demo video](docs/demo/vedium-demo-quiet-music.mp4?raw=true)
+
 ## Features
 
 - Fix spelling and grammar of recently typed text with a hotkey, in any app
