@@ -1,25 +1,34 @@
 # Vedium
 
-A Windows tray assistant for reading and writing. Vedium watches for your
-hotkey, fixes or rephrases the text you just typed — in any application — and
-shows you exactly what changed. It can run **fully offline** with a local AI
-model, or use a cloud API / CLI agent you already have.
+A Windows tray assistant that helps you understand what you read and improve
+what you write. Select text in your application and use a hotkey to explore
+its meaning, ask follow-up questions, or revise your writing. It can run
+**fully offline** with a local AI model, or use a cloud API / CLI agent you
+already have.
 
 ## Demo
 
-A quick look at Vedium, with quiet background music.
+A quick look at Vedium.
 
-https://github.com/user-attachments/assets/7feec6a4-bf3b-4c9e-8f3c-ca4f44438751
+https://github.com/user-attachments/assets/f242b3e4-4213-4368-9a3b-9041558aff45
 
-[Download the demo video](docs/demo/vedium-demo-quiet-music.mp4?raw=true)
+[Download the demo video](docs/demo/vedium-demo.mp4?raw=true)
 
 ## Features
 
-- Fix spelling and grammar of recently typed text with a hotkey, in any app
-- Rephrase modes (tone, clarity) and a small chat window
-- Writing modes to format selected text as bullet points, a numbered list,
-  a checklist, a Markdown table, or paragraphs with headings. Choose a mode in
-  **Settings → Assistant → Writing**, use your Writing hotkey, then review and replace as usual.
+- **Understand what you read** — select a passage to get its main idea, key
+  takeaways, a plain-language explanation, or an explanation with supporting quotes.
+- **Explore unfamiliar words and ideas** — define a word or phrase, then ask
+  follow-up questions about the selected text and its explanation.
+- **Improve your writing** — polish a draft, adjust its tone, make it more
+  concise or detailed, simplify the wording, or sharpen a thesis.
+- **Correct spelling and grammar** — fix recently typed text with a hotkey
+  and review the changes before replacing it.
+- **Give your text structure** — turn selected text into bullet points,
+  numbered lists, checklists, Markdown tables, or paragraphs with headings.
+- **Translate while you work** — use built-in translation modes for English,
+  Bosnian/Croatian/Serbian, and Chinese.
+- **Keep a conversation going** — use the chat window for longer exchanges.
 - Save personal reflections to a selectable local Markdown journal, grouped by source
 - Save editable `Define This` results to a local vocabulary journal, grouped by term
 - Toast popups that show a diff of what was changed
