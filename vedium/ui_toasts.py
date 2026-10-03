@@ -164,6 +164,16 @@ def _save_generated_style(cfg: dict, generated_text: str, parent) -> bool:
     return True
 
 
+def _journal_file_options(path) -> dict:
+    """Offer both formats, initially selecting the current journal's format."""
+    filetypes = [("Plain text files", "*.txt"), ("Markdown files", "*.md")]
+    extension = ".txt"
+    if path.suffix.lower() == ".md":
+        filetypes.reverse()
+        extension = ".md"
+    return {"defaultextension": extension, "filetypes": filetypes + [("All files", "*.*")]}
+
+
 def _open_reflection_dialog(parent, cfg: dict | None, passage: str, mode: str) -> bool:
     """Collect and locally save a reflection about the selected passage."""
     win = tk.Toplevel(parent)
@@ -193,8 +203,7 @@ def _open_reflection_dialog(parent, cfg: dict | None, passage: str, mode: str) -
         chosen = filedialog.asksaveasfilename(
             parent=win,
             title="Choose reflection journal",
-            defaultextension=".md",
-            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+            **_journal_file_options(journal_path[0]),
             initialdir=str(journal_path[0].parent),
             initialfile=journal_path[0].name,
             # Picking an existing journal is the normal case — entries are
@@ -352,8 +361,7 @@ def _open_vocabulary_dialog(
         chosen = filedialog.asksaveasfilename(
             parent=win,
             title="Choose vocabulary journal",
-            defaultextension=".md",
-            filetypes=[("Markdown files", "*.md"), ("All files", "*.*")],
+            **_journal_file_options(journal_path[0]),
             initialdir=str(journal_path[0].parent),
             initialfile=journal_path[0].name,
             confirmoverwrite=False,   # entries are appended, not overwritten

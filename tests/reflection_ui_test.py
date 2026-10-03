@@ -5,7 +5,7 @@
 
 Builds the real answer card and its two child dialogs in-process (no daemon,
 no keyboard listener, no model) and drives them the way a user would: press
-the button, fill the fields, press Save, then read the Markdown that landed
+the button, fill the fields, press Save, then read the TXT or Markdown that landed
 on disk.
 
 Complements the source-level assertions in refactor_smoke_tests.py, which can
@@ -599,10 +599,79 @@ close_card(card)
 # ── The journals stay independent of each other ──────────────────────────────
 check("vocabulary defaults beside the reflection journal",
       reflections.vocabulary_journal_path(reflection_path=moved)
-      == reflections.reflection_journal_path(configured_path=moved).with_name("Vocabulary.md"))
+      == reflections.reflection_journal_path(configured_path=moved).with_name("Vocabulary.txt"))
 check("an explicitly chosen vocabulary path wins",
       str(reflections.vocabulary_journal_path(
           configured_path=vocabulary, reflection_path=moved)) == vocabulary)
+
+# Both real save dialogs offer TXT and Markdown and remember a TXT selection.
+dialog_options = []
+text_path = os.path.join(tmpdir, "Text Reflections.txt")
+
+
+def choose_text(*args, **kwargs):
+    dialog_options.append(kwargs)
+    return text_path
+
+
+ui_toasts.filedialog.asksaveasfilename = choose_text
+card = make_card("Explain It (Simply)", "A plain passage.", "An explanation.", cfg)
+
+
+def save_text_reflection(dialog):
+    press(dialog, "Change…")
+    fill_reflection(dialog, "A plain reflection.", "Text Book")
+
+
+drive_dialog("Add reflection", save_text_reflection)
+buttons_titled(REFLECT)[0].invoke()
+root.update()
+check("TXT reflection path remembered", cfg["reflection_journal_path"] == text_path)
+text_content = open(text_path, encoding="utf-8").read() if os.path.exists(text_path) else ""
+check("reflection saved as plain text", "Source: Text Book\n" in text_content
+      and "Passage:\n    A plain passage." in text_content
+      and "Reflection:\n    A plain reflection." in text_content
+      and "<!--" not in text_content and "###" not in text_content)
+close_card(card)
+
+text_path = os.path.join(tmpdir, "Text Vocabulary.txt")
+card = make_card("Define This", "Readable", "Easy to read.", cfg)
+
+
+def save_text_vocabulary(dialog):
+    press(dialog, "Change…")
+    save_vocabulary(dialog)
+
+
+drive_dialog("Save to vocabulary", save_text_vocabulary)
+buttons_titled(VOCABULARY)[0].invoke()
+root.update()
+check("TXT vocabulary path remembered", cfg["vocabulary_journal_path"] == text_path)
+text_content = open(text_path, encoding="utf-8").read() if os.path.exists(text_path) else ""
+check("vocabulary saved as plain text", "Term: Readable\n" in text_content
+      and "Definition:\n    Easy to read." in text_content
+      and "<!--" not in text_content and "###" not in text_content)
+close_card(card)
+check("both pickers offer TXT and Markdown", len(dialog_options) == 2 and all(
+    ("Plain text files", "*.txt") in options["filetypes"]
+    and ("Markdown files", "*.md") in options["filetypes"]
+    for options in dialog_options))
+check("existing Markdown format initially selected", all(
+    options["defaultextension"] == ".md" and options["filetypes"][0][1] == "*.md"
+    for options in dialog_options))
+
+# Reopening the vocabulary picker must retain TXT. Cancelling it preserves the path.
+ui_toasts.filedialog.asksaveasfilename = lambda **kwargs: dialog_options.append(kwargs) or ""
+card = make_card("Define This", "Readable", "Another sense.", cfg)
+drive_dialog("Save to vocabulary", save_text_vocabulary)
+buttons_titled(VOCABULARY)[0].invoke()
+root.update()
+check("TXT format retained on reopening", dialog_options[-1]["defaultextension"] == ".txt"
+      and dialog_options[-1]["filetypes"][0][1] == "*.txt")
+check("cancelling picker preserves TXT path", cfg["vocabulary_journal_path"] == text_path)
+check("subsequent TXT save keeps earlier entries", "Easy to read." in open(text_path, encoding="utf-8").read()
+      and "Another sense." in open(text_path, encoding="utf-8").read())
+close_card(card)
 
 # ── Nothing was written outside the scratch directory ────────────────────────
 check("real config never written", not os.path.exists(

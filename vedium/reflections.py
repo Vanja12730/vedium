@@ -1,7 +1,7 @@
 # Copyright (C) 2026 vehab
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Local Markdown storage for the reader's reflections and vocabulary."""
+"""Local text and Markdown storage for the reader's reflections and vocabulary."""
 
 from contextlib import contextmanager
 from datetime import datetime
@@ -59,7 +59,8 @@ def reflection_journal_path(
     if str(configured_path or "").strip():
         return Path(os.path.expandvars(str(configured_path))).expanduser()
     base = Path(documents_dir) if documents_dir is not None else _documents_dir()
-    return base / "Vedium" / "Reflections.md"
+    legacy = base / "Vedium" / "Reflections.md"
+    return legacy if legacy.exists() else legacy.with_suffix(".txt")
 
 
 def vocabulary_journal_path(
@@ -74,7 +75,8 @@ def vocabulary_journal_path(
     reflections = reflection_journal_path(
         documents_dir, configured_path=reflection_path,
     )
-    return reflections.with_name("Vocabulary.md")
+    legacy = reflections.with_name("Vocabulary.md")
+    return legacy if legacy.exists() else legacy.with_suffix(".txt")
 
 
 def _markdown_quote(text: str) -> str:
@@ -177,20 +179,22 @@ def _append_grouped_entry(
     group_label: str,
     entry: str,
 ) -> None:
-    """Insert an entry into its case-insensitive Markdown group."""
+    """Insert an entry into its case-insensitive journal group."""
     journal.parent.mkdir(parents=True, exist_ok=True)
     # An entry never legitimately contains a sentinel, so this is the one place
     # that has to defuse them — doing it here rather than in each caller means a
     # future entry format cannot reintroduce the hole.
-    entry = _neutralise_markers(entry)
-    group_block = f"{marker}\n{heading_prefix}{group_label}"
+    if marker:
+        entry = _neutralise_markers(entry)
+    group_start = f"{marker}\n{heading_prefix}" if marker else heading_prefix
+    group_block = f"{group_start}{group_label}"
     with _journal_lock(journal):
         content = journal.read_text(encoding="utf-8") if journal.exists() else ""
         if not content.strip():
             updated = f"{title}\n\n{group_block}\n\n{entry}"
         else:
             sections = list(re.finditer(
-                rf"(?m)^{re.escape(marker)}\r?\n{re.escape(heading_prefix)}([^\r\n]+)$",
+                rf"(?m)^{re.escape(group_start)}([^\r\n]+)$",
                 content,
             ))
             section_index = next(
@@ -215,6 +219,11 @@ def _append_grouped_entry(
         _write_journal(journal, updated)
 
 
+def _text_body(text: str) -> str:
+    """Indent content so pasted text cannot be mistaken for a group heading."""
+    return "\n".join(f"    {line}" if line else "" for line in text.splitlines())
+
+
 def append_reflection(
     passage: str,
     reflection: str,
@@ -237,6 +246,21 @@ def append_reflection(
     journal = Path(path).expanduser() if path is not None else reflection_journal_path()
 
     source_label = source or "Unspecified source"
+    if journal.suffix.lower() == ".txt":
+        lines = [f"Date: {(created_at or datetime.now()).strftime('%Y-%m-%d %H:%M')}", ""]
+        if mode:
+            lines.extend([f"Mode: {mode}", ""])
+        lines.extend([
+            "Passage:", _text_body(passage), "",
+            "Reflection:", _text_body(reflection), "",
+        ])
+        _append_grouped_entry(
+            journal, title="Vedium Reflections", marker="",
+            heading_prefix="Source: ", group_label=source_label,
+            entry="\n".join(lines),
+        )
+        return journal
+
     lines = [f"### {(created_at or datetime.now()).strftime('%Y-%m-%d %H:%M')}", ""]
     if mode:
         lines.extend([f"**Mode:** {mode}", ""])
@@ -288,6 +312,18 @@ def append_vocabulary_entry(
 
     source = " ".join((source or "").split())
     journal = Path(path).expanduser() if path is not None else vocabulary_journal_path()
+    if journal.suffix.lower() == ".txt":
+        lines = [f"Date: {(created_at or datetime.now()).strftime('%Y-%m-%d %H:%M')}", ""]
+        if source:
+            lines.extend([f"Source: {source}", ""])
+        lines.extend(["Definition:", _text_body(definition), ""])
+        _append_grouped_entry(
+            journal, title="Vedium Vocabulary", marker="",
+            heading_prefix="Term: ", group_label=term,
+            entry="\n".join(lines),
+        )
+        return journal
+
     lines = [f"### {(created_at or datetime.now()).strftime('%Y-%m-%d %H:%M')}", ""]
     if source:
         lines.extend([f"**Source:** {source}", ""])

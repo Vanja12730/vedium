@@ -29,8 +29,10 @@ https://github.com/user-attachments/assets/f242b3e4-4213-4368-9a3b-9041558aff45
 - **Translate while you work** — use built-in translation modes for English,
   Bosnian/Croatian/Serbian, and Chinese.
 - **Keep a conversation going** — use the chat window for longer exchanges.
-- Save personal reflections to a selectable local Markdown journal, grouped by source
-- Save editable `Define This` results to a local vocabulary journal, grouped by term
+- Save personal reflections to a selectable local plain-text or Markdown journal, grouped by source
+- Save editable `Define This` results to a local plain-text or Markdown vocabulary journal, grouped by term
+- New journals default to TXT; existing Markdown journals and chosen paths are preserved.
+  Use **Change…** in either save dialog to choose TXT or Markdown for that journal.
 - Toast popups that show a diff of what was changed
 - Four interchangeable backends:
   - **Local model** (GGUF via Vedium's managed llama-server) — no internet needed
@@ -101,7 +103,7 @@ settings, including custom modes and hotkeys. Two things stay behind:
   deletes only Vedium's saved copy: the key keeps working with its provider.
   Credential Manager does not show the key itself, so keep your own copy if
   you want to use it elsewhere.
-- **Your notes**, `Reflections.md` and `Vocabulary.md`, stay in
+- **Your notes**, `Reflections.txt` and `Vocabulary.txt` (or `.md`), stay in
   `Documents\Vedium` or the folder you chose for them.
 
 Reinstalling or upgrading into the same directory is incremental: Vedium

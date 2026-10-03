@@ -81,7 +81,7 @@ def test_installer_reuses_compatible_private_runtime_on_reinstall() -> None:
     install_delete = installer.split("[InstallDelete]", 1)[1].split("[Icons]", 1)[0]
 
     assert "UsePreviousAppDir=yes" in installer
-    assert '#define AppVersion   "1.3.1"' in installer
+    assert '#define AppVersion   "1.3.2"' in installer
     assert "ArchitecturesAllowed=x64compatible" in installer
     assert '#define PythonBundleVersion "3.12.9-ui2"' in installer
     assert 'Name: "{app}\\python"; Check: ShouldResetPythonBundle' in install_delete
@@ -367,7 +367,7 @@ def test_reflections_are_local_structured_markdown() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         documents = pathlib.Path(tmp) / "Documents"
-        journal = reflections.reflection_journal_path(documents)
+        journal = reflections.reflection_journal_path(documents).with_suffix(".md")
         assert journal == documents / "Vedium" / "Reflections.md"
         custom = documents / "My Notes" / "Reading.md"
         assert reflections.reflection_journal_path(configured_path=custom) == custom
@@ -400,7 +400,8 @@ def test_reflections_are_local_structured_markdown() -> None:
         vocabulary = reflections.vocabulary_journal_path(
             documents, reflection_path=custom,
         )
-        assert vocabulary == custom.with_name("Vocabulary.md")
+        assert vocabulary == custom.with_name("Vocabulary.txt")
+        vocabulary = vocabulary.with_suffix(".md")
         custom_vocabulary = documents / "Words.md"
         assert reflections.vocabulary_journal_path(
             configured_path=custom_vocabulary,
