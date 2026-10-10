@@ -283,4 +283,4 @@ release and this commercial-licensing option. See
 
 Vedium is free. If it's useful to you, you can support its development:
 
-[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/fortunadigitas)
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/vanja34)
