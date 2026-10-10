@@ -35,7 +35,7 @@
 #endif
 
 #define AppName      "Vedium"
-#define AppVersion   "1.3.2"
+#define AppVersion   "1.3.3"
 #define AppPublisher "The Ved Project"
 ; Single source of truth for the project URLs; update here if the repo moves
 ; (e.g. transferred to the ved-project org) and both Setup fields follow.
@@ -63,6 +63,9 @@ OutputDir=Output
 OutputBaseFilename=VediumSetup_v{#AppVersion}
 Compression=lzma
 SolidCompression=yes
+; The managed llama-server engine ships as .zip archives; "full" is the
+; extractor mode that handles .zip (the default handles only .7z).
+ArchiveExtraction=full
 WizardStyle=modern
 ; Default to the existing install folder on upgrades/reinstalls. The directory
 ; page is still shown, so the user can choose another location explicitly.
@@ -127,6 +130,14 @@ Name: "{userdesktop}\{#AppName}";  \
       WorkingDir: "{app}";             \
       IconFilename: "{app}\app.ico";   \
       Comment: "Start Vedium — reading & writing assistant"
+; Start menu shortcut — makes Vedium searchable in Start, where right-click
+; offers Windows' standard Uninstall. Per-user, since setup runs unelevated.
+Name: "{autoprograms}\{#AppName}";  \
+      Filename: "wscript.exe";       \
+      Parameters: """{app}\{#AppExeName}"""; \
+      WorkingDir: "{app}";             \
+      IconFilename: "{app}\app.ico";   \
+      Comment: "Start Vedium — reading & writing assistant"
 
 [Code]
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,6 +175,8 @@ var
   GModelPath:        String;  // full path to the downloaded .gguf (if any)
   GModelDisplayName: String;  // selected recommended model name for summaries
   GExistingModelConfig: Boolean; // True when a returning user's config is preserved
+  GEngineDownloadPage: TDownloadWizardPage;   // in-wizard engine download progress
+  GEngineExtractPage:  TExtractionWizardPage; // in-wizard engine unpack progress
 
 
 // ── Incremental reinstall / private Python compatibility ────────────────────
@@ -442,62 +455,115 @@ end;
 // so new GGUF architectures do not require a compatible Python native wheel.
 // CUDA installs include the matching runtime DLL archive; users need a recent
 // NVIDIA driver, but do not need to install the CUDA toolkit themselves.
-function DownloadEngineArchive(Url, DestFile, Description: String): Boolean;
+//
+// Downloading and unpacking run on Inno Setup's own wizard pages, which show
+// the archive name, a live progress bar and a Stop download button inside the
+// setup window, so the ~630 MB CUDA download never looks stalled.
+procedure InitializeWizard();
+begin
+  GEngineDownloadPage := CreateDownloadPage(
+    'Installing the local AI engine',
+    'Downloading llama-server. This happens once; later reinstalls reuse it.',
+    nil);
+  GEngineDownloadPage.ShowBaseNameInsteadOfUrl := True;
+  GEngineExtractPage := CreateExtractionPage(
+    'Installing the local AI engine',
+    'Unpacking llama-server...',
+    nil);
+end;
+
+
+// The download page saves into {tmp}; move a finished archive into the
+// persistent engine cache. FileCopy covers an install folder on another drive.
+function MoveToEngineCache(const DestFile: String): Boolean;
 var
-  ScriptFile: String;
-  ScriptText: String;
-  Code: Integer;
-  WindowMode: Integer;
+  TmpFile: String;
 begin
   Result := FileExists(DestFile);
   if Result then Exit;
+  TmpFile := ExpandConstant('{tmp}\') + ExtractFileName(DestFile);
+  Result := RenameFile(TmpFile, DestFile) or FileCopy(TmpFile, DestFile, False);
+  if not Result then DeleteFile(DestFile);  // never leave a partial cache file
+end;
 
-  ForceDirectories(ExtractFileDir(DestFile));
-  ScriptFile := ExpandConstant('{tmp}\vedium_engine_download.py');
-  ScriptText :=
-    'import sys, urllib.request' + #13#10 +
-    'url, dest, label = sys.argv[1:4]' + #13#10 +
-    'print("Downloading " + label + "...")' + #13#10 +
-    'urllib.request.urlretrieve(url, dest)' + #13#10;
-  if not SaveStringToFile(ScriptFile, ScriptText, False) then Exit;
 
-  Code := -1;
-  if WizardSilent then WindowMode := SW_HIDE else WindowMode := SW_SHOW;
-  Exec(
-    GPythonExe,
-    '"' + ScriptFile + '" "' + Url + '" "' + DestFile + '" "' + Description + '"',
-    '', WindowMode, ewWaitUntilTerminated, Code);
-  Result := (Code = 0) and FileExists(DestFile);
-  if not Result then DeleteFile(DestFile);
+// Fetch whichever archives are not cached yet. RuntimeUrl is empty for the CPU
+// engine. Returns False after explaining a failure, or quietly when the user
+// pressed Stop download (the completion screen then says the engine was skipped).
+function DownloadEngineArchives(
+  MainUrl, MainArchive, RuntimeUrl, RuntimeArchive: String): Boolean;
+var
+  Pending: Boolean;
+begin
+  Result := False;
+  Pending := False;
+  ForceDirectories(ExtractFileDir(MainArchive));
+  GEngineDownloadPage.Clear;
+  if not FileExists(MainArchive) then
+  begin
+    GEngineDownloadPage.Add(MainUrl, ExtractFileName(MainArchive), '');
+    Pending := True;
+  end;
+  if (RuntimeUrl <> '') and not FileExists(RuntimeArchive) then
+  begin
+    GEngineDownloadPage.Add(RuntimeUrl, ExtractFileName(RuntimeArchive), '');
+    Pending := True;
+  end;
+
+  if Pending then
+  begin
+    GEngineDownloadPage.Show;
+    try
+      try
+        GEngineDownloadPage.Download;
+      except
+        if not GEngineDownloadPage.AbortedByUser then
+          MsgBox(
+            'The managed local engine download failed:' + #13#10 +
+            GetExceptionMessage + #13#10 + #13#10 +
+            'Run setup again to retry.', mbError, MB_OK);
+        Exit;
+      end;
+    finally
+      GEngineDownloadPage.Hide;
+    end;
+  end;
+
+  Result := MoveToEngineCache(MainArchive) and
+            ((RuntimeUrl = '') or MoveToEngineCache(RuntimeArchive));
+  if not Result then
+    MsgBox(
+      'The managed local engine was downloaded but could not be saved to' + #13#10 +
+      '  ' + ExtractFileDir(MainArchive) + #13#10 + #13#10 +
+      'Check free disk space, then run setup again.', mbError, MB_OK);
 end;
 
 
 function ExtractServerArchives(
   DestDir, MainArchive, RuntimeArchive, MarkerValue: String): Boolean;
 var
-  ScriptFile: String;
-  ScriptText: String;
-  Code: Integer;
   MarkerFile: String;
 begin
   Result := False;
-  ScriptFile := ExpandConstant('{tmp}\vedium_engine_extract.py');
-  ScriptText :=
-    'import pathlib, shutil, sys, zipfile' + #13#10 +
-    'dest = pathlib.Path(sys.argv[1])' + #13#10 +
-    'archives = [pathlib.Path(p) for p in sys.argv[2:] if p]' + #13#10 +
-    'if dest.exists(): shutil.rmtree(dest)' + #13#10 +
-    'dest.mkdir(parents=True, exist_ok=True)' + #13#10 +
-    'for archive in archives:' + #13#10 +
-    '    with zipfile.ZipFile(archive) as z: z.extractall(dest)' + #13#10;
-  if not SaveStringToFile(ScriptFile, ScriptText, False) then Exit;
+  // Start from an empty folder so DLLs from an older build never mix in.
+  if DirExists(DestDir) then DelTree(DestDir, True, True, True);
+  ForceDirectories(DestDir);
 
-  Code := -1;
-  Exec(
-    GPythonExe,
-    '"' + ScriptFile + '" "' + DestDir + '" "' + MainArchive + '" "' + RuntimeArchive + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if (Code <> 0) or not FileExists(DestDir + '\llama-server.exe') then Exit;
+  GEngineExtractPage.Clear;
+  GEngineExtractPage.Add(MainArchive, DestDir, True);
+  if RuntimeArchive <> '' then
+    GEngineExtractPage.Add(RuntimeArchive, DestDir, True);
+  GEngineExtractPage.Show;
+  try
+    try
+      GEngineExtractPage.Extract;
+    except
+      Exit;
+    end;
+  finally
+    GEngineExtractPage.Hide;
+  end;
+  if not FileExists(DestDir + '\llama-server.exe') then Exit;
 
   MarkerFile := ExpandConstant('{app}\llama-server\.vedium-server-version');
   ForceDirectories(ExtractFileDir(MarkerFile));
@@ -612,13 +678,6 @@ begin
     RuntimeArchive := CacheDir + '\cudart-llama-bin-win-cuda-12.4-x64.zip';
     MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cuda-12.4-x64.zip';
     RuntimeUrl := BaseUrl + 'cudart-llama-bin-win-cuda-12.4-x64.zip';
-    if not DownloadEngineArchive(MainUrl, MainArchive, 'llama-server CUDA engine') or
-       not DownloadEngineArchive(RuntimeUrl, RuntimeArchive, 'CUDA runtime') then
-    begin
-      MsgBox('The managed GPU engine download failed. Run setup again to retry.',
-             mbError, MB_OK);
-      Exit;
-    end;
   end
   else
   begin
@@ -626,13 +685,10 @@ begin
     ServerDir := ServerRoot + '\cpu';
     MainArchive := CacheDir + '\llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
     MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
-    if not DownloadEngineArchive(MainUrl, MainArchive, 'llama-server CPU engine') then
-    begin
-      MsgBox('The managed CPU engine download failed. Run setup again to retry.',
-             mbError, MB_OK);
-      Exit;
-    end;
   end;
+
+  if not DownloadEngineArchives(MainUrl, MainArchive, RuntimeUrl, RuntimeArchive) then
+    Exit;
 
   if not ExtractServerArchives(
        ServerDir, MainArchive, RuntimeArchive, MarkerValue) then
