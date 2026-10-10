@@ -278,3 +278,9 @@ third-party components and model weights remain subject to their own terms.
 Contributions are accepted under terms that preserve both the public GPL
 release and this commercial-licensing option. See
 [CONTRIBUTING.md](CONTRIBUTING.md) before submitting code.
+
+## Support
+
+Vedium is free. If it's useful to you, you can support its development:
+
+[![Support me on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/fortunadigitas)
