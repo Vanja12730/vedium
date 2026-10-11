@@ -27,41 +27,14 @@ code contributions are welcome.
    `local_model_benchmark.py` needs a local GGUF model and llama-server.
 3. Explain the user-facing effect, testing performed, and any privacy or
    security implications in the pull request.
-4. Add a contributor sign-off to every commit with `git commit -s`; under this
-   policy, that sign-off records agreement to the contributor licence terms
-   below.
+4. Sign off every commit with `git commit -s`. The sign-off certifies the
+   [Developer Certificate of Origin](https://developercertificate.org/): you
+   wrote the change, or otherwise have the right to submit it.
 
-## Contributor licence terms
+## Licence of contributions
 
-Vedium is publicly distributed under GPL-3.0-only. The project may also offer
-separate commercial licences so organizations can integrate Vedium under terms
-that are not compatible with the GPL. To preserve that option, every
-contributor must agree to the terms below.
-
-By intentionally submitting a contribution to Vedium, you certify that:
-
-1. You created the contribution, or you have sufficient legal authority to
-   submit it under these terms.
-2. You grant the Vedium copyright holder and its successors a perpetual,
-   worldwide, non-exclusive, royalty-free, irrevocable licence to reproduce,
-   modify, prepare derivative works of, publicly display, publicly perform,
-   sublicense, and distribute your contribution under GPL-3.0-only and under
-   other licence terms, including commercial or proprietary terms.
-3. You grant a perpetual, worldwide, non-exclusive, royalty-free, irrevocable
-   patent licence for patent claims you control that are necessarily infringed
-   by your contribution alone or by its combination with Vedium.
-4. You retain ownership of your contribution and may use it elsewhere. Public
-   Vedium releases containing it remain available under GPL-3.0-only.
-5. You understand that the contribution and its project history will be public
-   and may be redistributed indefinitely.
-
-The `Signed-off-by` line records your agreement to these contributor licence
-terms. Maintainers cannot accept a contribution without that sign-off.
-
-This document is intended to keep project ownership clear and preserve both
-open-source and commercial licensing options. A project owner planning a
-substantial commercial transaction should have these terms reviewed by
-qualified counsel in the relevant jurisdiction.
+Vedium is licensed under GPL-3.0-only. By submitting a contribution, you agree
+that it is licensed under the same terms.
 
 ## Third-party material
 

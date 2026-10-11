@@ -267,18 +267,6 @@ and improve.
 Vedium bundles third-party components under their own (GPL-compatible)
 licenses. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
-### Commercial licensing
-
-Organizations that want to incorporate Vedium into software distributed under
-terms incompatible with GPL-3.0 may request a separate commercial licence from
-the copyright holder. This option does not remove or restrict the GPL rights of
-any public Vedium release. A commercial licence covers only Vedium-owned code;
-third-party components and model weights remain subject to their own terms.
-
-Contributions are accepted under terms that preserve both the public GPL
-release and this commercial-licensing option. See
-[CONTRIBUTING.md](CONTRIBUTING.md) before submitting code.
-
 ## Support
 
 Vedium is free. If it's useful to you, you can support its development:

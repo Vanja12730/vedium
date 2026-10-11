@@ -26,3 +26,8 @@ managed-server.log
 vedium_config.json
 # Pre-rename config name, still adopted by the upgrade migration
 spell_daemon_config.json
+
+# Local-only: promo teaser and AI-assistant instructions
+teaser/
+AGENTS.md
+CLAUDE.md
