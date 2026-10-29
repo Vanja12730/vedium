@@ -35,7 +35,7 @@
 #endif
 
 #define AppName      "Vedium"
-#define AppVersion   "1.3.3"
+#define AppVersion   "1.3.4"
 #define AppPublisher "The Ved Project"
 ; Single source of truth for the project URLs; update here if the repo moves
 ; (e.g. transferred to the ved-project org) and both Setup fields follow.
