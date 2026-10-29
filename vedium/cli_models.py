@@ -457,6 +457,15 @@ def run_agy(
     user's default model). agy has no reasoning-effort flag; the level is part
     of the model name itself.
     """
+    # agy only takes the prompt as an argument. Through cmd.exe, a quote in
+    # selected text would end the argument and let `&` run commands, and
+    # cmd.exe has no complete escaping, so a .cmd/.bat wrapper is refused.
+    if path.lower().endswith((".cmd", ".bat")):
+        raise CLIModelError(
+            "Vedium found the Antigravity CLI only as a .cmd or .bat wrapper, "
+            "which cannot safely receive selected text. Install the native "
+            "agy.exe and put it on PATH."
+        )
     if system.strip():
         prompt = f"[Instructions]\n{system}\n\n{prompt}"
     if len(prompt) > _AGY_PROMPT_LIMIT:

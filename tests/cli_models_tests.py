@@ -392,6 +392,19 @@ def test_run_agy_rejects_silent_model_substitution():
         raise AssertionError("oversized agy prompt should fail")
 
 
+def test_run_agy_refuses_cmd_wrappers():
+    payload = 'text" & echo INJECTED> marker.txt & rem '
+    for path in ("C:/bin/agy.cmd", "C:/bin/AGY.BAT"):
+        with mock.patch.object(cli_models.subprocess, "run") as run:
+            try:
+                cli_models.run_agy(path, "", "", payload, ".")
+            except cli_models.CLIModelError as exc:
+                assert "agy.exe" in str(exc)
+            else:
+                raise AssertionError(f"{path} should be refused")
+            run.assert_not_called()
+
+
 def test_converse_routes_antigravity_models():
     listed = ["gemini-3.6-flash-low\tGemini 3.6 Flash (Low)"]
     with mock.patch.object(cli_models, "resolve_cli", return_value="agy.exe"), \
@@ -498,6 +511,7 @@ def main() -> int:
         test_antigravity_model_entries_handle_output_format_drift,
         test_run_agy_command_and_log_verification,
         test_run_agy_rejects_silent_model_substitution,
+        test_run_agy_refuses_cmd_wrappers,
         test_converse_routes_antigravity_models,
         test_converse_opt_in_neutral_cwd_and_provenance,
         test_cli_client_keeps_provenance_separate,
