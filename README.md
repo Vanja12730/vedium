@@ -10,7 +10,7 @@ already have.
 
 A quick look at Vedium.
 
-https://github.com/user-attachments/assets/e0426ea2-732f-44ae-a85e-e7de1eb2324a
+https://github.com/user-attachments/assets/3d599a8a-2c7c-4967-ac2e-32bb837c2189
 
 [Download the demo video](docs/demo/vedium-demo.mp4?raw=true)
 
