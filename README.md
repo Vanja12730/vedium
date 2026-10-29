@@ -3,52 +3,56 @@
 A Windows tray assistant that helps you understand what you read and improve
 what you write. Select text in your application and use a hotkey to explore
 its meaning, ask follow-up questions, or revise your writing. It can run
-**fully offline** with a local AI model, or use a cloud API / CLI agent you
+**fully offline** with a local AI model, or use a cloud API or CLI agent you
 already have.
 
 ## Demo
 
-A quick look at Vedium.
+A quick look at Vedium:
 
 https://github.com/user-attachments/assets/3d599a8a-2c7c-4967-ac2e-32bb837c2189
 
 [Download the demo video](docs/demo/vedium-demo.mp4?raw=true)
 
+The full walkthrough on YouTube (47 minutes) reads the opening of Hegel's
+*Phenomenology of Spirit* with Vedium and covers every feature, from the first
+run to installation and diagnostics:
+
+[![Watch the full Vedium walkthrough on YouTube](https://img.youtube.com/vi/HQaXjg1-UoQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=HQaXjg1-UoQ)
+
 ## Features
 
-- **Understand what you read** — select a passage to get its main idea, key
+- **Understand what you read:** select a passage to get its main idea, key
   takeaways, a plain-language explanation, or an explanation with supporting quotes.
-- **Explore unfamiliar words and ideas** — define a word or phrase, then ask
+- **Explore unfamiliar words and ideas:** define a word or phrase, then ask
   follow-up questions about the selected text and its explanation.
-- **Improve your writing** — polish a draft, adjust its tone, make it more
+- **Improve your writing:** polish a draft, adjust its tone, make it more
   concise or detailed, simplify the wording, or sharpen a thesis.
-- **Correct spelling and grammar** — fix recently typed text with a hotkey
+- **Correct spelling and grammar:** fix recently typed text with a hotkey
   and review the changes before replacing it.
-- **Give your text structure** — turn selected text into bullet points,
+- **Give your text structure:** turn selected text into bullet points,
   numbered lists, checklists, Markdown tables, or paragraphs with headings.
-- **Translate while you work** — use built-in translation modes for English,
+- **Translate while you work:** use built-in translation modes for English,
   Bosnian/Croatian/Serbian, and Chinese.
-- **Keep a conversation going** — use the chat window for longer exchanges.
-- Save personal reflections to a selectable local plain-text or Markdown journal, grouped by source
-- Save editable `Define This` results to a local plain-text or Markdown vocabulary journal, grouped by term
-- New journals default to TXT; existing Markdown journals and chosen paths are preserved.
-  Use **Change…** in either save dialog to choose TXT or Markdown for that journal.
-- Toast popups that show a diff of what was changed
-- Four interchangeable backends:
-  - **Local model** (GGUF via Vedium's managed llama-server) — no internet needed
-  - **llama-server** — point it at a server you already run
-  - **Cloud API** — any OpenAI-compatible endpoint (e.g. Google Gemini)
-  - **CLI agents** — Claude Code, Codex, or Antigravity, if installed
-- Everything configured from the tray icon — right-click → Settings
+- **Keep a conversation going:** use the chat window for longer exchanges.
+- **Keep a journal:** save personal reflections, grouped by source, and
+  `Define This` results, grouped by term, to local plain-text or Markdown files.
+- **See what changed:** toast popups show a diff of every edit.
+- **Choose your backend:** four interchangeable options.
+  - **Local model** (GGUF via Vedium's managed llama-server), no internet needed
+  - **llama-server:** point it at a server you already run
+  - **Cloud API:** any OpenAI-compatible endpoint (e.g. Google Gemini)
+  - **CLI agents:** Claude Code, Codex, or Antigravity, if installed
+- Everything is configured from the tray icon: right-click it and choose **Settings**.
 
 ## Install
 
-Two ways in. If you already have Python, **installing from source is two
-commands and Windows raises no SmartScreen warning**. If you would rather not
-deal with Python at all, the installer bundles everything for you — but
-Windows will warn you about it once, because it is not code-signed.
+There are two ways in. If you already have Python, installing from source
+takes two commands and Windows shows no warning. If you would rather not deal
+with Python, the installer bundles everything, but Windows warns you about it
+once because it is not code-signed.
 
-### Option 1 — From source (no SmartScreen warning)
+### Option 1: From source
 
 Requires Python 3.10+ from [python.org](https://www.python.org/downloads/)
 (3.12 recommended; tkinter is included in the python.org installer).
@@ -62,66 +66,55 @@ py -3.12 -m vedium
 
 Or double-click `run.vbs` to start it without a console window.
 
-Nothing here trips SmartScreen: you are running your own checkout with your
-own Python, so there is no unrecognised downloaded executable for Windows to
-quarantine.
-
 To use a **local model** from a source checkout, put a current
 `llama-server.exe` distribution in `llama-server\cuda` or
 `llama-server\cpu`, or set the `VEDIUM_LLAMA_SERVER` environment variable to
 its full path. See [GPU_INSTALL_GUIDE.md](GPU_INSTALL_GUIDE.md). Cloud API and
 CLI backends need nothing extra.
 
-### Option 2 — Installer (no Python needed)
+### Option 2: Installer (no Python needed)
 
 1. Download `VediumSetup_v*.exe` from the
    [latest release](../../releases/latest).
-2. Run it. **Windows SmartScreen will warn you** ("Windows protected your
-   PC") because the installer is not code-signed — click **More info →
-   Run anyway**. The installer is built from exactly the code in this
-   repository; you can audit it or build it yourself (see below), or use
-   Option 1 above and avoid the warning entirely.
+2. Run it. Windows SmartScreen shows **"Windows protected your PC"** because
+   the installer is not code-signed. Click **More info**, then **Run anyway**.
+   See [Is the installer safe?](#is-the-installer-safe) if you want to check
+   it first.
 3. Follow the wizard. It will:
-   - install Vedium with its own **private Python** — it never touches or
+   - install Vedium with its own **private Python**, which never touches or
      even looks at any Python you may have installed;
    - ask which managed llama-server build you want (it detects NVIDIA CUDA
-     and recommends GPU or CPU — or choose *Skip* for cloud / CLI only);
+     and recommends GPU or CPU, or choose *Skip* for cloud and CLI only);
    - offer a choice of two tested local models (~2.5 or ~5.0 GB, optional).
 4. Double-click the **Vedium** shortcut on your Desktop. A tray icon
-   appears — right-click it to open Settings.
+   appears. Right-click it to open Settings.
 
-No Python, no pip, no PATH changes — the install is fully self-contained.
-It installs into your user profile, so there is no administrator prompt.
+The install is fully self-contained: no Python, no pip, no PATH changes. It
+installs into your user profile, so there is no administrator prompt.
+Upgrading keeps your settings and model choice, and reuses the engine already
+downloaded.
 
 Uninstalling from *Add/Remove Programs* removes the app, its private Python,
 the local engine, any model downloaded into the install folder, and your
 settings, including custom modes and hotkeys. Two things stay behind:
 
 - **Saved API keys** stay in Windows Credential Manager, so a later reinstall
-  picks them up. To remove them, open **Credential Manager → Windows
+  picks them up. To remove them, open **Credential Manager > Windows
   Credentials** and remove each `Vedium/cloud_api_key/<provider>` entry. This
-  deletes only Vedium's saved copy: the key keeps working with its provider.
+  deletes only Vedium's saved copy, and the key keeps working with its provider.
   Credential Manager does not show the key itself, so keep your own copy if
   you want to use it elsewhere.
 - **Your notes**, `Reflections.txt` and `Vocabulary.txt` (or `.md`), stay in
   `Documents\Vedium` or the folder you chose for them.
 
-Reinstalling or upgrading into the same directory is incremental: Vedium
-preserves a compatible private Python environment, reuses an already-working
-versioned local engine, keeps the existing model/backend configuration, and
-caches downloaded engine archives. A new engine is fetched only when its pinned
-llama.cpp build changes; a clean Python replacement happens only when the
-installer declares an incompatible private-runtime version.
-
 ### Is the installer safe?
 
-The first time you run the installer, Windows shows **"Windows protected your
-PC"**. That is Microsoft Defender SmartScreen reporting an *unrecognised* app:
-the installer is not code-signed and has not yet been downloaded by many
-people. It does not mean a virus was found — when Microsoft Defender detects
-malware, it blocks the file and shows a threat alert.
+The SmartScreen warning means Windows does not recognise the app yet: the
+installer is not code-signed and has not been downloaded by many people. It
+does not mean a virus was found. When Microsoft Defender detects malware, it
+blocks the file and shows a threat alert.
 
-You can check the installer yourself instead of taking that on trust:
+You can check the installer yourself:
 
 - **Compare the checksum.** Each release lists the installer's SHA-256. In
   PowerShell, in the folder you downloaded it to, run
@@ -171,7 +164,7 @@ The first run asks you to sign in. See Anthropic's
 [Claude Code installation guide](https://support.claude.com/en/articles/14552382-your-first-day-in-claude-code).
 
 After installing a CLI, restart Vedium so it sees the updated `PATH`. Then open
-**Settings -> Model**, choose **AI CLI**, enable *Use installed AI CLIs as
+**Settings > Model**, choose **AI CLI**, enable *Use installed AI CLIs as
 models*, select a detected model, and click **Save & Load Model**.
 
 ### Free-tier status (checked 2026-08-08)
@@ -186,33 +179,31 @@ models*, select a detected model, and click **Save & Load Model**.
   Code is included only in paid Claude plans; API and third-party-provider use
   may be billed separately. See [Claude pricing](https://claude.com/pricing).
 
-Plans and limits change, so treat this dated snapshot as a quick guide and
-check the linked provider pages before signing up.
+Plans and limits change, so check the linked provider pages before signing up.
 
 ## Choosing a model (local backend)
 
 The installer offers two tested recommendations:
 
-- **Gemma 4 E4B instruct, Q4_K_M** (~5.0 GB) — the best-quality choice,
+- **Gemma 4 E4B instruct, Q4_K_M** (~5.0 GB): the best-quality choice,
   particularly for explanations and reading tasks. It is the default when a
   compatible NVIDIA system is detected. An 8 GB GPU is a practical fit for
   typical use: `lmstudio-community/gemma-4-E4B-it-GGUF`.
-- **Gemma 3 4B instruct, Q4_K_M** (~2.5 GB) — the smaller, faster choice for
+- **Gemma 3 4B instruct, Q4_K_M** (~2.5 GB): the smaller, faster choice for
   CPU-only and lower-memory PCs: `unsloth/gemma-3-4b-it-GGUF`.
 
 Either model can be selected on any supported PC, or the download can be
-skipped. **Both models run on CPU as well as NVIDIA GPU**; GPU acceleration is
-faster, but is not required. Architecture support does not guarantee that a
-large model will fit comfortably in your RAM/VRAM. If full GPU offload is not
-possible, llama.cpp can place some work in system RAM at reduced speed.
+skipped. **Both models run on CPU as well as NVIDIA GPU.** GPU acceleration is
+faster but not required. Supporting a model's architecture does not guarantee
+that a large model fits comfortably in your RAM or VRAM. If full GPU offload is not possible,
+llama.cpp can place some work in system RAM at reduced speed.
 
-Settings → Browse next to *"Model (.gguf)"* → Save & Load Model. Leave
-*Prompt format* on Auto.
+To use another model: **Settings**, then **Browse** next to *Model (.gguf)*,
+then **Save & Load Model**. Leave *Prompt format* on Auto.
 
 ## Privacy
 
-Read this before using Vedium — it is a keyboard tool, and you should know
-exactly what it does:
+Vedium is a keyboard tool, so read this before using it:
 
 - **Vedium uses a global keyboard listener** (via `pynput`) to keep a short
   buffer of your recent keystrokes. That is what lets it correct the text
@@ -220,7 +211,7 @@ exactly what it does:
   disk and never leaves your machine on its own. It is erased before Vedium
   accepts typing from a different foreground window and immediately when you
   disable Vedium from the tray. Capture also resets when the focused field
-  changes, on Tab, and on document clicks/shortcuts. Password fields are
+  changes, on Tab, and on document clicks and shortcuts. Password fields are
   excluded. Automatic capture pauses if Windows accessibility cannot confirm
   a supported, non-password text field; unsupported editors may require an
   explicit selection and manual copying of the result.
@@ -233,12 +224,12 @@ exactly what it does:
   sent to the provider you configured (e.g. Google). Their data policies
   apply to what you send.
 - **CLI backend:** the text is passed to the CLI agent you selected
-  (Claude Code / Codex / Antigravity), which sends it to its provider under
+  (Claude Code, Codex or Antigravity), which sends it to its provider under
   your existing account and its policies.
 - **API keys** are stored in the Windows Credential Manager, not in the
   config file. They remain there after an uninstall until you remove them
   (see [Install](#install)).
-- Vedium itself has **no telemetry, no analytics, no auto-update** — it
+- Vedium itself has **no telemetry, no analytics, and no auto-update**. It
   only talks to the network when the backend you chose requires it.
 
 ## Building the installer yourself
@@ -246,13 +237,8 @@ exactly what it does:
 1. Install [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 2. Build the portable Python bundle (once, and after dependency changes):
    `py -3.12 make_python_bundle.py`
-3. Compile `Vedium.iss` (right-click → Compile). The installer appears in
-   `Output\`.
-
-When changing the bundled Python version or its preinstalled runtime packages,
-bump `PythonBundleVersion` in `Vedium.iss`. Do not bump it for ordinary Vedium
-code changes. To ship a newer local engine, bump `ServerBuild` in
-`CheckManagedLlamaServer`; a same-version reinstall reuses what is already there.
+3. Compile `Vedium.iss` (right-click it and choose **Compile**). The installer
+   appears in `Output\`.
 
 ## License
 
