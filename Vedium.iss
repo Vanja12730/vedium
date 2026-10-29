@@ -153,15 +153,26 @@ Name: "{autoprograms}\{#AppName}";  \
 
 // Recommended public, ungated local models. Gemma 4 E4B is the quality choice;
 // Gemma 3 4B remains available for modest hardware and CPU-oriented installs.
+// Each URL is pinned to a Hugging Face commit and each file to its SHA-256,
+// so the installer only accepts the exact files that were tested.
 const
   GEMMA4_FILENAME = 'gemma-4-E4B-it-Q4_K_M.gguf';
   GEMMA4_URL =
-    'https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF/resolve/main/' +
-    'gemma-4-E4B-it-Q4_K_M.gguf';
+    'https://huggingface.co/lmstudio-community/gemma-4-E4B-it-GGUF/resolve/' +
+    '99210a71094c6aa8559f764e0cadedd7d89de94d/gemma-4-E4B-it-Q4_K_M.gguf';
+  GEMMA4_SHA256 = '0ffb122c8b6921f13cbc34186e052524d0b5803b17f4867b7197a561400b3770';
   GEMMA3_FILENAME = 'gemma-3-4b-it-Q4_K_M.gguf';
   GEMMA3_URL =
-    'https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/' +
+    'https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/' +
+    '5a3566e716d80f709ed7b79817eaf7733d2a1fce/' +
     'gemma-3-4b-it-Q4_K_M.gguf';
+  GEMMA3_SHA256 = '04a43a22e8d2003deda5acc262f68ec1005fa76c735a9962a8c77042a74a7d19';
+
+  // SHA-256 of the llama.cpp release archives for ServerBuild (b10327).
+  // Update these together with ServerBuild.
+  ENGINE_CPU_SHA256  = 'c2781932f9af623c9498a12f002f667d2b668f65e0f19b4401e12b5fe9f860c3';
+  ENGINE_CUDA_SHA256 = '8932f819b9ba0d7866911bac5db4a01d9ebefd0071c4293b1ef9ab5c22919637';
+  CUDART_SHA256      = '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6';
 
 var
   GPythonExe:        String;  // full path to the bundled {app}\python\python.exe
@@ -487,26 +498,46 @@ begin
 end;
 
 
+// Delete a cached archive whose SHA-256 differs from the pinned one, so it is
+// downloaded again instead of being extracted.
+procedure DropUnverifiedCache(const Archive, Sha256: String);
+var
+  Matches: Boolean;
+begin
+  if not FileExists(Archive) then Exit;
+  try
+    Matches := CompareText(GetSHA256OfFile(Archive), Sha256) = 0;
+  except
+    Matches := False;
+  end;
+  if not Matches then DeleteFile(Archive);
+end;
+
+
 // Fetch whichever archives are not cached yet. RuntimeUrl is empty for the CPU
-// engine. Returns False after explaining a failure, or quietly when the user
+// engine. The download page rejects a file whose SHA-256 does not match.
+// Returns False after explaining a failure, or quietly when the user
 // pressed Stop download (the completion screen then says the engine was skipped).
 function DownloadEngineArchives(
-  MainUrl, MainArchive, RuntimeUrl, RuntimeArchive: String): Boolean;
+  MainUrl, MainArchive, MainSha256,
+  RuntimeUrl, RuntimeArchive, RuntimeSha256: String): Boolean;
 var
   Pending: Boolean;
 begin
   Result := False;
   Pending := False;
   ForceDirectories(ExtractFileDir(MainArchive));
+  DropUnverifiedCache(MainArchive, MainSha256);
+  if RuntimeUrl <> '' then DropUnverifiedCache(RuntimeArchive, RuntimeSha256);
   GEngineDownloadPage.Clear;
   if not FileExists(MainArchive) then
   begin
-    GEngineDownloadPage.Add(MainUrl, ExtractFileName(MainArchive), '');
+    GEngineDownloadPage.Add(MainUrl, ExtractFileName(MainArchive), MainSha256);
     Pending := True;
   end;
   if (RuntimeUrl <> '') and not FileExists(RuntimeArchive) then
   begin
-    GEngineDownloadPage.Add(RuntimeUrl, ExtractFileName(RuntimeArchive), '');
+    GEngineDownloadPage.Add(RuntimeUrl, ExtractFileName(RuntimeArchive), RuntimeSha256);
     Pending := True;
   end;
 
@@ -585,6 +616,8 @@ var
   RuntimeArchive: String;
   MainUrl: String;
   RuntimeUrl: String;
+  MainSha256: String;
+  RuntimeSha256: String;
   MarkerFile: String;
   MarkerValue: String;
   Lines: TArrayOfString;
@@ -670,6 +703,7 @@ begin
   ForceDirectories(CacheDir);
   RuntimeArchive := '';
   RuntimeUrl := '';
+  RuntimeSha256 := '';
   if IsGPU then
   begin
     MarkerValue := ServerBuild + '-cuda12.4';
@@ -678,6 +712,8 @@ begin
     RuntimeArchive := CacheDir + '\cudart-llama-bin-win-cuda-12.4-x64.zip';
     MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cuda-12.4-x64.zip';
     RuntimeUrl := BaseUrl + 'cudart-llama-bin-win-cuda-12.4-x64.zip';
+    MainSha256 := ENGINE_CUDA_SHA256;
+    RuntimeSha256 := CUDART_SHA256;
   end
   else
   begin
@@ -685,9 +721,11 @@ begin
     ServerDir := ServerRoot + '\cpu';
     MainArchive := CacheDir + '\llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
     MainUrl := BaseUrl + 'llama-' + ServerBuild + '-bin-win-cpu-x64.zip';
+    MainSha256 := ENGINE_CPU_SHA256;
   end;
 
-  if not DownloadEngineArchives(MainUrl, MainArchive, RuntimeUrl, RuntimeArchive) then
+  if not DownloadEngineArchives(MainUrl, MainArchive, MainSha256,
+                                RuntimeUrl, RuntimeArchive, RuntimeSha256) then
     Exit;
 
   if not ExtractServerArchives(
@@ -817,7 +855,7 @@ end;
 // the current percent to a temp file; the wizard polls that file and drives the
 // progress bar, repainting the form each tick (Refresh) so the bar animates.
 function DownloadModelWithProgress(
-  const Url, Dest, ModelName, SizeLabel: String): Boolean;
+  const Url, Sha256, Dest, ModelName, SizeLabel: String): Boolean;
 var
   PyFile, ProgFile, DoneFile: String;
   Script: String;
@@ -837,8 +875,9 @@ begin
   // Downloader script: writes integer percent to ProgFile during the transfer
   // and a final OK / FAIL line to DoneFile so the poll loop knows when to stop.
   Script :=
-    'import urllib.request' + #13#10 +
+    'import hashlib, os, urllib.request' + #13#10 +
     'url  = r"' + Url + '"' + #13#10 +
+    'sha  = "' + Sha256 + '"' + #13#10 +
     'dest = r"' + Dest + '"' + #13#10 +
     'prog = r"' + ProgFile + '"' + #13#10 +
     'done = r"' + DoneFile + '"' + #13#10 +
@@ -851,6 +890,13 @@ begin
     '            pass' + #13#10 +
     'try:' + #13#10 +
     '    urllib.request.urlretrieve(url, dest, hook)' + #13#10 +
+    '    h = hashlib.sha256()' + #13#10 +
+    '    with open(dest, "rb") as f:' + #13#10 +
+    '        for chunk in iter(lambda: f.read(1 << 20), b""):' + #13#10 +
+    '            h.update(chunk)' + #13#10 +
+    '    if h.hexdigest() != sha:' + #13#10 +
+    '        os.remove(dest)' + #13#10 +
+    '        raise ValueError("the file does not match the tested model, so it was deleted")' + #13#10 +
     '    f = open(done, "w"); f.write("OK"); f.close()' + #13#10 +
     'except Exception as e:' + #13#10 +
     '    f = open(done, "w"); f.write("FAIL: " + str(e)); f.close()' + #13#10;
@@ -1055,6 +1101,7 @@ var
   CfgFile: String;
   ModelChoice: String;
   ModelUrl: String;
+  ModelSha256: String;
   ModelFileName: String;
   ModelName: String;
   SizeLabel: String;
@@ -1116,6 +1163,7 @@ begin
   if ModelChoice = 'gemma4' then
   begin
     ModelUrl      := GEMMA4_URL;
+    ModelSha256   := GEMMA4_SHA256;
     ModelFileName := GEMMA4_FILENAME;
     ModelName     := 'Gemma 4 E4B';
     SizeLabel     := '~5.0 GB';
@@ -1123,6 +1171,7 @@ begin
   else if ModelChoice = 'gemma3' then
   begin
     ModelUrl      := GEMMA3_URL;
+    ModelSha256   := GEMMA3_SHA256;
     ModelFileName := GEMMA3_FILENAME;
     ModelName     := 'Gemma 3 4B';
     SizeLabel     := '~2.5 GB';
@@ -1131,7 +1180,7 @@ begin
     Exit;
 
   Dest := ExpandConstant('{app}\' + ModelFileName);
-  if DownloadModelWithProgress(ModelUrl, Dest, ModelName, SizeLabel) then
+  if DownloadModelWithProgress(ModelUrl, ModelSha256, Dest, ModelName, SizeLabel) then
   begin
     GModelDownloaded  := True;
     GModelPath        := Dest;
